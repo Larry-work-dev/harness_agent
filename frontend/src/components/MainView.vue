@@ -89,7 +89,19 @@ async function invite() {
   try { await api(`/workspaces/${workspaceId.value}/members`, { method: 'POST', body: { username } }); toast('已加入成員') }
   catch (e) { toast('邀請失敗：' + e.message) }
 }
-
+async function delWorkspace() {
+  if (!workspaceId.value) return
+  if (!confirm('確定要刪除目前的 Workspace 嗎？這將會刪除裡面所有的對話且無法復原！')) return
+  
+  try {
+    await api(`/workspaces/${workspaceId.value}`, { method: 'DELETE' })
+    toast('Workspace 已刪除')
+    // 刪除成功後重新載入列表，這會自動選取下一個可用的 Workspace 或清空畫面
+    await loadWorkspaces() 
+  } catch (e) {
+    toast('刪除失敗：' + e.message)
+  }
+}
 async function loadConversations() {
   if (!workspaceId.value) { conversations.value = []; return }
   conversations.value = await api(`/workspaces/${workspaceId.value}/conversations`)
@@ -217,6 +229,7 @@ async function copy(text, i) {
         </select>
         <button class="icon" title="新增 workspace" @click="newWorkspace">＋</button>
         <button class="icon" title="邀請成員" @click="invite">邀請</button>
+        <button class="icon" title="刪除 workspace" @click="delWorkspace" v-if="workspaceId">刪除</button>
       </div>
       <div class="spacer"></div>
       <div class="mode-pick" v-if="conversationId">

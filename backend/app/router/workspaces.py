@@ -42,3 +42,14 @@ def get_conversations(wid: int, user=Depends(current_user)):
 def new_conversation(wid: int, body: ConversationIn, user=Depends(current_user)):
     require_member(wid, user)
     return db.create_conversation(wid, body.title or "新對話")
+
+@router.delete("/workspaces/{wid}")
+def delete_workspace(wid: int, user=Depends(current_user)):
+    # 1. 驗證使用者是否有該 workspace 的權限
+    require_member(wid, user)
+    
+    # 2. 呼叫資料庫操作刪除 workspace (請確保 db_client 中有實作此方法)
+    db.delete_workspace(wid)
+    
+    # 3. 回傳成功訊息
+    return {"ok": True}

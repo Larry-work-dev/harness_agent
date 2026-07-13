@@ -35,6 +35,9 @@ def get_user_by_token(token):
 def create_workspace(name, owner_id) -> dict:
     return _json(_client.post("/workspaces", json={"name": name, "owner_id": owner_id}))
 
+def delete_workspace(workspace_id) -> None:
+    return _json(_client.delete(f"/workspaces/{workspace_id}"))
+
 def list_workspaces(user_id) -> list:
     return _json(_client.get("/workspaces", params={"user_id": user_id}))
 

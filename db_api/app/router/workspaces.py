@@ -15,6 +15,10 @@ class MemberIn(BaseModel):
 def create_workspace(w: WorkspaceIn, db: Session = Depends(get_db)):
     return svc.create_workspace(db, w.name, w.owner_id)
 
+@router.delete("/workspaces/{workspace_id}")
+def delete_workspace(workspace_id: int, db: Session = Depends(get_db)):
+    return svc.delete_workspace(db, workspace_id)
+
 @router.get("/workspaces")
 def list_workspaces(user_id: int, db: Session = Depends(get_db)):
     return svc.list_workspaces(db, user_id)

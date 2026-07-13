@@ -10,6 +10,15 @@ def create_workspace(db, name, owner_id) -> dict:
     db.commit()
     return {"id": w.id, "name": w.name}
 
+def delete_workspace(db, workspace_id) -> None:
+    # 1. 刪除 WorkspaceMember 中的所有成員
+    db.query(WorkspaceMember).filter(WorkspaceMember.workspace_id == workspace_id).delete()
+    
+    # 2. 刪除 Workspace
+    db.query(Workspace).filter(Workspace.id == workspace_id).delete()
+    
+    # 3. 提交變更
+    db.commit()
 
 def list_workspaces(db, user_id) -> list:
     rows = db.execute(
