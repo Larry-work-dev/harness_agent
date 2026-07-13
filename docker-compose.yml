@@ -1,0 +1,34 @@
+# 應用這包：db_api（唯一連 DB）+ backend（主邏輯）+ frontend（nginx）。
+# 前置：先啟動 DB 那包（會建立 external 網路 harness-net）：
+#   docker compose -f db/docker-compose.yml up -d
+# 再啟動應用：
+#   docker compose up -d --build
+services:
+  db_api:
+    container_name: harness-db_api
+    build: ./db_api
+    env_file: ./db_api/.env            # DB 連線字串
+    networks: [harness-net]
+    # 內部服務，不需對外開埠；要除錯可加 ports: ["9000:9000"]
+
+  backend:
+    container_name: harness-backend 
+    build: ./backend
+    env_file: ./backend/.env          # LLM / embedding / RAG 設定
+    depends_on: [db_api]
+    ports:
+      - "8000:8000"
+    networks: [harness-net]
+
+  frontend:
+    container_name: harness-frontend
+    build: ./frontend                 # Vite 建置 → nginx serve dist
+    depends_on: [backend]
+    ports:
+      - "8880:80"                      # 瀏覽器開 http://localhost:8880
+    networks: [harness-net]
+
+networks:
+  harness-net:
+    external: true                     # 由 db 那包建立
+    name: harness-net

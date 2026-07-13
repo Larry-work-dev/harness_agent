@@ -1,0 +1,13 @@
+:root {
+  --bg:#0E1117; --surface:#161B24; --surface-2:#1D2430; --border:#2A3240;
+  --text:#E6EAF2; --muted:#8B94A6; --agent:#56C7D6; --skill:#E2A855;
+  --success:#6BCB77; --danger:#E06C75;
+  --font-display:"Space Grotesk",sans-serif; --font-body:"Inter",system-ui,sans-serif;
+  --font-mono:"JetBrains Mono",ui-monospace,monospace;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+html,body,#app { height:100%; }
+body { background:var(--bg); color:var(--text); font-family:var(--font-body); font-size:15px; line-height:1.6; }
+button { font-family:inherit; cursor:pointer; }
+::-webkit-scrollbar { width:9px; }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:5px; }
