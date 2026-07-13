@@ -153,3 +153,28 @@ def search_memories(q: MemorySearchIn):
 @app.delete("/memories/{mid}")
 def delete_memory(mid: int, user_id: int):
     store.delete_memory(mid, user_id); return {"ok": True}
+
+
+# ---- 自訂模型 profile ------------------------------------------------
+class ModelProfileIn(BaseModel):
+    user_id: int
+    name: str
+    base_url: str
+    model: str
+    api_key: str | None = None
+
+@app.post("/model-profiles")
+def create_model_profile(p: ModelProfileIn):
+    return store.create_model_profile(p.user_id, p.name, p.base_url, p.model, p.api_key)
+
+@app.get("/model-profiles")
+def list_model_profiles(user_id: int):
+    return store.list_model_profiles(user_id)
+
+@app.get("/model-profiles/{pid}")
+def get_model_profile(pid: int, user_id: int):
+    return store.get_model_profile(pid, user_id)
+
+@app.delete("/model-profiles/{pid}")
+def delete_model_profile(pid: int, user_id: int):
+    store.delete_model_profile(pid, user_id); return {"ok": True}

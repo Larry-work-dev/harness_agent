@@ -3,7 +3,7 @@
 前後分離、多使用者、有長短期記憶的對話式 agent。服務拆成四塊：
 
 ```
-frontend (nginx)  ── 對話式深色 UI（登入 + workspace + 對話列表）
+frontend (Vite+Vue) ── 對話式深色 UI（登入 + workspace + 對話列表 + 記憶面板）
       │  同源反代
 backend           ── 主邏輯：認證流程、harness、兩層記憶編排
       │  HTTP
@@ -55,3 +55,8 @@ docker compose -f db/docker-compose.yml down -v     # 連資料一起清
 ## 新增 skill
 
 在 `backend/skills/` 放一個 `.py`、匯出 `SKILL` 物件即可，harness 會自動載入。
+
+## 前端（Vite + Vue）
+
+開發：`cd frontend && npm install && npm run dev`（vite proxy 會把 API 代到 backend:8000）。
+正式：由 `frontend/Dockerfile` 建置後用 nginx serve，`docker compose up` 會自動 build。

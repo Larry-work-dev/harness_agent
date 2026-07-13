@@ -1,79 +1,31 @@
-"""模型設定 —— 唯一「掛 model」的地方。
+"""模型設定 —— 掛 model 的地方（OpenAI 相容端點）。
 
-想換模型、換供應商、改參數，只動這個檔案或 backend/.env，
-main.py / harness.py 都不用碰。
+支援：
+  - 分級 profile（local / cloud / mid / cheap / default），各讀自己那組環境變數，
+    未設則回退到 LLM_*。供路由層依任務挑選。
+  - 依明確 spec（base_url/model/api_key）建立模型：給「gateway 上選的模型」或
+    「使用者自訂 profile」使用。
+  - 列出 gateway /v1/models 可用模型。
+  - embedding 模型（長期記憶語意召回）。
 
-用環境變數 LLM_PROVIDER 切換來源：
-    openai     任何 OpenAI 相容端點（公司內部端點屬於這類，預設）
-    anthropic  Anthropic 官方或自架 gateway
-    ollama     本機 Ollama
-
-其餘設定（模型名稱、金鑰、base_url、溫度）都從環境變數 / .env 讀。
+環境變數（以 CLOUD 為例）：CLOUD_BASE_URL / CLOUD_MODEL / CLOUD_API_KEY，
+未設則用 LLM_BASE_URL / LLM_MODEL / LLM_API_KEY。
 """
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-# 讀取 backend/.env（不論從哪個目錄啟動都找得到）
 load_dotenv(Path(__file__).parent / ".env")
 
+DEFAULT_BASE = "https://devops.avc.co:28003/LLM_api/v1"
 
-def create_model():
-    """依 LLM_PROVIDER 建立並回傳一個聊天模型。"""
-    provider = os.environ.get("LLM_PROVIDER", "openai").lower()
-    temperature = float(os.environ.get("LLM_TEMPERATURE", "0"))
-
-    if provider == "openai":
-        import httpx
-        from langchain_openai import ChatOpenAI
-
-        # 處理內部端點的自簽 / 私有 CA 憑證：
-        #   LLM_CA_BUNDLE=/path/ca.pem  → 用公司 CA 驗證（正確做法）
-        #   LLM_VERIFY_SSL=false        → 跳過驗證（僅限內網測試，不安全）
-        #   兩者都沒設                   → 照系統預設正常驗證
-        ca = os.environ.get("LLM_CA_BUNDLE")
-        verify_ssl = os.environ.get("LLM_VERIFY_SSL", "true").lower() != "false"
-        if ca:
-            http_client = httpx.Client(verify=ca)
-        elif not verify_ssl:
-            http_client = httpx.Client(verify=False)
-        else:
-            http_client = None
-
-        return ChatOpenAI(
-            model=_require("LLM_MODEL"),
-            base_url=os.environ.get("LLM_BASE_URL", "https://devops.avc.co:28003/LLM_api/v1"),
-            api_key=os.environ.get("LLM_API_KEY", "sk-noauth"),  # 端點不需金鑰時留預設
-            temperature=temperature,
-            http_client=http_client,
-        )
-
-    if provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic
-
-        return ChatAnthropic(
-            model=_require("LLM_MODEL"),
-            api_key=_require("LLM_API_KEY"),
-            temperature=temperature,
-        )
-
-    if provider == "ollama":
-        from langchain_ollama import ChatOllama
-
-        return ChatOllama(
-            model=_require("LLM_MODEL"),
-            base_url=os.environ.get("LLM_BASE_URL", "http://localhost:11434"),
-            temperature=temperature,
-        )
-
-    raise ValueError(
-        f"未知的 LLM_PROVIDER：'{provider}'（可用：openai / anthropic / ollama）"
-    )
+# 路由層會用到的分級 profile 名稱
+PROFILES = ["local", "cloud", "mid", "cheap"]
 
 
 def _openai_http_client():
-    """依環境變數回傳處理過憑證的 httpx client（供 LLM 與 embedding 共用）。"""
+    """依環境變數回傳處理過憑證的 httpx client（LLM / embedding / 列模型共用）。"""
     import httpx
 
     ca = os.environ.get("LLM_CA_BUNDLE")
@@ -85,25 +37,58 @@ def _openai_http_client():
     return None
 
 
-def create_embedder():
-    """長期記憶用的 embedding 模型（OpenAI 相容 /v1/embeddings）。"""
-    from langchain_openai import OpenAIEmbeddings
+def profile_spec(profile: str | None) -> dict:
+    """把 profile 名稱轉成 {base_url, model, api_key}；未設則回退 LLM_*。"""
+    pre = (profile or "").upper()
+    def g(suffix, fallback):
+        return os.environ.get(f"{pre}_{suffix}" if pre else "__none__", fallback)
+    return {
+        "base_url": g("BASE_URL", os.environ.get("LLM_BASE_URL", DEFAULT_BASE)),
+        "model":    g("MODEL",    os.environ.get("LLM_MODEL", "")),
+        "api_key":  g("API_KEY",  os.environ.get("LLM_API_KEY", "sk-noauth")),
+    }
 
-    return OpenAIEmbeddings(
-        model=os.environ.get("EMBED_MODEL", "Qwen3-embedding"),
-        base_url=os.environ.get("EMBED_BASE_URL",
-                                os.environ.get("LLM_BASE_URL", "https://devops.avc.co:28003/LLM_api/v1")),
-        api_key=os.environ.get("LLM_API_KEY", "sk-noauth"),
-        http_client=_openai_http_client(),
-        check_embedding_ctx_length=False,  # 非 OpenAI 端點不套 tiktoken 分段假設
+
+def build_chat_model(base_url, model, api_key, temperature=0):
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        model=model, base_url=base_url, api_key=api_key or "sk-noauth",
+        temperature=temperature, http_client=_openai_http_client(),
     )
 
 
-def _require(key: str) -> str:
-    val = os.environ.get(key)
-    if not val:
-        raise RuntimeError(
-            f"缺少環境變數 {key}。請在 backend/.env 設定"
-            f"（可先 cp .env.example .env 再填）。"
-        )
-    return val
+def create_model(profile: str | None = None, spec: dict | None = None, temperature: float = 0):
+    """建立聊天模型：給 spec 就用 spec，否則依 profile（None → LLM_* 預設）。"""
+    if spec is None:
+        spec = profile_spec(profile)
+    return build_chat_model(spec["base_url"], spec["model"], spec.get("api_key"), temperature)
+
+
+def list_gateway_models() -> list[str]:
+    """列出 gateway /v1/models 可用模型 id；失敗回空陣列。"""
+    import httpx
+
+    base = os.environ.get("LLM_BASE_URL", DEFAULT_BASE).rstrip("/")
+    key = os.environ.get("LLM_API_KEY", "sk-noauth")
+    client = _openai_http_client() or httpx.Client()
+    try:
+        r = client.get(base + "/models", headers={"Authorization": f"Bearer {key}"}, timeout=10)
+        r.raise_for_status()
+        return [m["id"] for m in r.json().get("data", [])]
+    except Exception:
+        return []
+    finally:
+        try: client.close()
+        except Exception: pass
+
+
+def create_embedder():
+    """長期記憶用的 embedding 模型（OpenAI 相容 /v1/embeddings）。"""
+    from langchain_openai import OpenAIEmbeddings
+    return OpenAIEmbeddings(
+        model=os.environ.get("EMBED_MODEL", "Qwen3-embedding"),
+        base_url=os.environ.get("EMBED_BASE_URL", os.environ.get("LLM_BASE_URL", DEFAULT_BASE)),
+        api_key=os.environ.get("LLM_API_KEY", "sk-noauth"),
+        http_client=_openai_http_client(),
+        check_embedding_ctx_length=False,
+    )

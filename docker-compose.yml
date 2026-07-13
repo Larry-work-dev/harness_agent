@@ -24,11 +24,8 @@ services:
     networks: [harness-net]
 
   frontend:
-    image: nginx:latest
     container_name: harness-frontend
-    volumes:
-      - ./frontend:/usr/share/nginx/html:ro
-      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    build: ./frontend                 # Vite 建置 → nginx serve dist
     depends_on: [backend]
     ports:
       - "8880:80"                      # 瀏覽器開 http://localhost:8880

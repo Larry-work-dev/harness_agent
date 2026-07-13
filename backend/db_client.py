@@ -94,3 +94,18 @@ def search_memories(user_id, embedding, k=5) -> list:
 
 def delete_memory(memory_id, user_id):
     _json(_client.delete(f"/memories/{memory_id}", params={"user_id": user_id}))
+
+
+# ---- 自訂模型 profile ------------------------------------------------
+def create_model_profile(user_id, name, base_url, model, api_key=None) -> dict:
+    return _json(_client.post("/model-profiles", json={
+        "user_id": user_id, "name": name, "base_url": base_url, "model": model, "api_key": api_key}))
+
+def list_model_profiles(user_id) -> list:
+    return _json(_client.get("/model-profiles", params={"user_id": user_id}))
+
+def get_model_profile(profile_id, user_id):
+    return _json(_client.get(f"/model-profiles/{profile_id}", params={"user_id": user_id}))
+
+def delete_model_profile(profile_id, user_id):
+    _json(_client.delete(f"/model-profiles/{profile_id}", params={"user_id": user_id}))

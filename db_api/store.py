@@ -81,6 +81,15 @@ def init_db() -> None:
                 embedding  vector,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+            CREATE TABLE IF NOT EXISTS model_profiles (
+                id         SERIAL PRIMARY KEY,
+                user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name       TEXT NOT NULL,
+                base_url   TEXT NOT NULL,
+                model      TEXT NOT NULL,
+                api_key    TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
             """
         )
 
@@ -212,7 +221,7 @@ def add_message(conversation_id, role, content, sources=None):
 def list_messages(conversation_id) -> list[dict]:
     with _conn() as c:
         rows = c.execute(
-            "SELECT id,role,content,sources FROM messages WHERE conversation_id=%s ORDER BY id",
+            "SELECT id,role,content,sources,created_at FROM messages WHERE conversation_id=%s ORDER BY id",
             (conversation_id,),
         ).fetchall()
     for r in rows:
@@ -261,3 +270,33 @@ def search_memories(user_id, embedding, k=5) -> list[dict]:
 def delete_memory(memory_id, user_id):
     with _conn() as c:
         c.execute("DELETE FROM memories WHERE id=%s AND user_id=%s", (memory_id, user_id))
+
+
+# ---- 自訂模型 profile（綁 user）--------------------------------------
+def create_model_profile(user_id, name, base_url, model, api_key) -> dict:
+    with _conn() as c:
+        row = c.execute(
+            "INSERT INTO model_profiles(user_id,name,base_url,model,api_key) VALUES (%s,%s,%s,%s,%s) RETURNING id,name,base_url,model",
+            (user_id, name, base_url, model, api_key),
+        ).fetchone()
+        return row
+
+
+def list_model_profiles(user_id) -> list[dict]:
+    with _conn() as c:
+        return c.execute(
+            "SELECT id,name,base_url,model FROM model_profiles WHERE user_id=%s ORDER BY id",
+            (user_id,),
+        ).fetchall()
+
+
+def get_model_profile(profile_id, user_id):
+    with _conn() as c:
+        return c.execute(
+            "SELECT * FROM model_profiles WHERE id=%s AND user_id=%s", (profile_id, user_id)
+        ).fetchone()
+
+
+def delete_model_profile(profile_id, user_id):
+    with _conn() as c:
+        c.execute("DELETE FROM model_profiles WHERE id=%s AND user_id=%s", (profile_id, user_id))
