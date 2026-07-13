@@ -1,19 +1,23 @@
 """Agent Harness — 包在 agent 外層的執行框架。
 
-和單純的 ReAct agent 差別在於，harness 負責：
-  1. 探索並載入 skills，把它們的用途注入系統提示
-  2. 把 skills 綁定成 tools，組出 agent 迴圈（LangGraph）
-  3. 用 step budget 限制迴圈次數，避免失控
-  4. 執行時對外發出「結構化事件」（可觀測性），前端可即時呈現：
-       skill_call   → agent 決定呼叫某個 skill
-       skill_result → skill 實際執行完的結果
-       final        → 最終回覆
-       error        → 發生錯誤
+負責：
+  1. 探索並載入 skills，把用途注入系統提示
+  2. （若 gateway 支援）把 skills 綁成 tools，組出 agent 迴圈（LangGraph）
+  3. step budget 限制迴圈次數
+  4. 對外發出結構化事件（skill_call / skill_result / final / error）
+
+TOOLS_ENABLED 開關
+------------------
+有些 OpenAI 相容 gateway（如未加 --enable-auto-tool-choice 的 vLLM）不支援
+tool calling，送 tools 會回 400。此時把環境變數 TOOLS_ENABLED 設為 false（預設），
+harness 就不綁 tools、純文字生成，對話仍可運作（但不會呼叫 skill）。
+gateway 支援 tool calling 後設 TOOLS_ENABLED=true 即恢復完整 agent 流程。
 
 model 抽成參數，方便替換成假模型做離線測試。
 """
 from __future__ import annotations
 
+import os
 from typing import Annotated, Any, Iterator, TypedDict, cast
 
 from langchain_core.messages import BaseMessage
@@ -22,6 +26,10 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from app.module.skills import load_skills
+
+
+def tools_enabled() -> bool:
+    return os.environ.get("TOOLS_ENABLED", "false").lower() == "true"
 
 
 class State(TypedDict):
@@ -33,10 +41,14 @@ class Harness:
         self.skills = load_skills()
         self.tools = [s.as_tool() for s in self.skills]
         self.max_steps = max_steps
-        self.model = model.bind_tools(self.tools)
+        self.use_tools = tools_enabled()
+        # 只有 gateway 支援 tool calling 時才綁 tools，否則純文字生成
+        self.model = model.bind_tools(self.tools) if self.use_tools else model
         self.graph = self._build()
 
     def system_prompt(self) -> str:
+        if not self.use_tools:
+            return "你是一個繁體中文助理，請清楚、準確地回答使用者。"
         catalog = "\n".join(
             f"- {s.name}：{s.description}（{s.when_to_use}）" for s in self.skills
         )
@@ -54,14 +66,20 @@ class Harness:
         def call_model(state: State):
             return {"messages": [self.model.invoke(state["messages"])]}
 
+        b = StateGraph(State)
+        b.add_node("agent", call_model)
+        b.add_edge(START, "agent")
+
+        if not self.use_tools:
+            # 無 tools：agent 產生回覆後直接結束
+            b.add_edge("agent", END)
+            return b.compile()
+
         def should_continue(state: State):
             last = state["messages"][-1]
             return "tools" if getattr(last, "tool_calls", None) else END
 
-        b = StateGraph(State)
-        b.add_node("agent", call_model)
         b.add_node("tools", ToolNode(self.tools))
-        b.add_edge(START, "agent")
         b.add_conditional_edges("agent", should_continue, ["tools", END])
         b.add_edge("tools", "agent")
         return b.compile()

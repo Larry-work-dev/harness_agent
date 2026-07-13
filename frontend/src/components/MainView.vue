@@ -35,17 +35,32 @@ async function addCustomModel() {
   await loadModels()
   toast('已新增自訂模型')
 }
-// 切換目前對話的模式並存回 DB
-async function setMode(mode) {
-  if (!conversationId.value) return
-  if (mode === 'manual' && (convModelSel.value === 'auto' || !convModelSel.value)) {
-    convModelSel.value = 'profile:' + (models.value.profiles[0] || 'cloud')  // 預設挑第一個
-  }
+// 把模式/模型存回該對話（單一入口，避免讀到過時的 ref）
+async function persistMode(mode, model) {
   convMode.value = mode
-  const model = mode === 'manual' ? convModelSel.value : 'auto'
+  convModelSel.value = model
   await api(`/conversations/${conversationId.value}/mode`, { method: 'POST', body: { mode, model } })
   const cv = conversations.value.find(c => c.id === conversationId.value)
   if (cv) { cv.mode = mode; cv.model = model }
+}
+function firstModelOption() {
+  if (models.value.profiles.length) return 'profile:' + models.value.profiles[0]
+  if (models.value.gateway.length) return 'gateway:' + models.value.gateway[0]
+  if (models.value.custom.length) return 'custom:' + models.value.custom[0].id
+  return 'profile:cloud'
+}
+// 切 auto / manual（toggle 按鈕用）
+async function applyMode(mode) {
+  if (!conversationId.value) return
+  if (mode === 'auto') return persistMode('auto', 'auto')
+  let model = convModelSel.value
+  if (!model || model === 'auto') model = firstModelOption()   // 進手動時若還沒選模型就挑一個
+  return persistMode('manual', model)
+}
+// 下拉選模型（值直接來自事件，不靠 v-model 時序）
+async function applyModel(val) {
+  if (!conversationId.value || !val) return
+  return persistMode('manual', val)
 }
 
 function toast(msg) {
@@ -133,7 +148,8 @@ async function send() {
         const line = p.replace(/^data: /, '').trim(); if (!line) continue
         const ev = JSON.parse(line)
         if (ev.type === 'routing') {
-          items.value.push({ kind: 'routing', text: `${ev.reason}（${ev.mode === 'workflow' ? '流程' : '模型'}：${ev.model}）` })
+          const actual = ev.actual_model ? ` → ${ev.actual_model}` : ''
+          items.value.push({ kind: 'routing', text: `${ev.reason}（${ev.mode === 'workflow' ? '流程' : '模型'}：${ev.model}${actual}）` })
         } else if (ev.type === 'skill_call') {
           const t = { kind: 'trace', skill: ev.skill, args: JSON.stringify(ev.args), result: '…' }
           items.value.push(t); (pending[ev.skill] = pending[ev.skill] || []).push(t)
@@ -205,11 +221,11 @@ async function copy(text, i) {
       <div class="spacer"></div>
       <div class="mode-pick" v-if="conversationId">
         <div class="seg">
-          <button :class="{ active: convMode === 'auto' }" @click="setMode('auto')">🧭 自動</button>
-          <button :class="{ active: convMode === 'manual' }" @click="setMode('manual')">🔧 手動</button>
+          <button :class="{ active: convMode === 'auto' }" @click="applyMode('auto')">🧭 自動</button>
+          <button :class="{ active: convMode === 'manual' }" @click="applyMode('manual')">🔧 手動</button>
         </div>
-        <select v-if="convMode === 'manual'" v-model="convModelSel" class="model-sel"
-                @change="setMode('manual')" title="這個對話使用的模型">
+        <select v-if="convMode === 'manual'" :value="convModelSel" class="model-sel"
+                @change="applyModel($event.target.value)" title="這個對話使用的模型">
           <optgroup label="分級 profile">
             <option v-for="p in models.profiles" :key="p" :value="'profile:' + p">{{ p }}</option>
           </optgroup>

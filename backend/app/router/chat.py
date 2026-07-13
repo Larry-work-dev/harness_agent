@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.config import create_embedder, create_model
+from app.config import create_embedder, create_model, profile_spec
 from app.module import db_client as db
 from app.module.deps import current_user, require_conversation
 from app.module.harness import Harness
@@ -19,6 +19,13 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
+
+
+def actual_model_name(decision) -> str:
+    """算出這次實際會送給 gateway 的 model 名（profile 要查 env，spec 直接有）。"""
+    if decision.get("spec"):
+        return decision["spec"].get("model") or "?"
+    return profile_spec(decision.get("profile"))["model"] or "?"
 
 
 def resolve_override(user, model_str):
@@ -59,6 +66,10 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         d = routing.route(req.message)
         decision = {**d, "spec": None, "label": d.get("profile") or d.get("workflow")}
 
+    print(f"[chat] conv.mode={conv.get('mode')!r} conv.model={conv.get('model')!r} "
+          f"→ decision: mode={decision['mode']} profile={decision.get('profile')!r} "
+          f"spec={decision.get('spec')!r} label={decision.get('label')!r}", flush=True)
+
     def sse(o):
         return f"data: {json.dumps(o, ensure_ascii=False)}\n\n"
 
@@ -69,8 +80,10 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         db.rename_conversation(req.conversation_id, req.message[:30])
 
     def event_stream():
+        actual = actual_model_name(decision) if decision["mode"] == "generate" else None
         yield sse({"type": "routing", "mode": decision["mode"],
-                   "model": decision["label"], "reason": decision["reason"]})
+                   "model": decision["label"], "actual_model": actual,
+                   "reason": decision["reason"]})
         try:
             if decision["mode"] == "workflow":
                 wf = get_workflow(decision["workflow"])
@@ -85,7 +98,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
             memory_text = memory.recall(embedder, user["id"], req.message)
             hist = ([{"role": "system", "content": "以下是先前對話的摘要：\n" + summary}] if summary else []) + recent
 
-            model = create_model(profile=decision.get("profile"), spec=decision.get("spec"))
+            model = create_model(profile=decision.get("profile"), spec=decision.get("spec"), temperature=0.0)
             harness = Harness(model)
 
             final_content = None; collected = {}

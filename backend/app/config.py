@@ -61,6 +61,7 @@ def create_model(profile: str | None = None, spec: dict | None = None, temperatu
     """建立聊天模型：給 spec 就用 spec，否則依 profile（None → LLM_* 預設）。"""
     if spec is None:
         spec = profile_spec(profile)
+    print(f"[create_model] profile={profile} → base_url={spec['base_url']!r} model={spec['model']!r}", flush=True)
     return build_chat_model(spec["base_url"], spec["model"], spec.get("api_key"), temperature)
 
 
@@ -88,7 +89,7 @@ def create_embedder():
     return OpenAIEmbeddings(
         model=os.environ.get("EMBED_MODEL", "Qwen3-embedding"),
         base_url=os.environ.get("EMBED_BASE_URL", os.environ.get("LLM_BASE_URL", DEFAULT_BASE)),
-        api_key=os.environ.get("LLM_API_KEY", "sk-noauth"),
+        api_key=os.environ.get("LLM_API_KEY"),
         http_client=_openai_http_client(),
         check_embedding_ctx_length=False,
     )
