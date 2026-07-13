@@ -61,6 +61,8 @@ def init_db() -> None:
                 id               TEXT PRIMARY KEY,
                 workspace_id     INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
                 title            TEXT NOT NULL,
+                mode             TEXT NOT NULL DEFAULT 'auto',   -- auto | manual
+                model            TEXT NOT NULL DEFAULT 'auto',   -- manual 時選定的模型字串
                 summary          TEXT NOT NULL DEFAULT '',
                 summary_until_id BIGINT NOT NULL DEFAULT 0,
                 created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -90,6 +92,9 @@ def init_db() -> None:
                 api_key    TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+            -- 既有 DB 遷移：補上對話的模式/模型欄位
+            ALTER TABLE conversations ADD COLUMN IF NOT EXISTS mode  TEXT NOT NULL DEFAULT 'auto';
+            ALTER TABLE conversations ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT 'auto';
             """
         )
 
@@ -178,7 +183,7 @@ def create_conversation(workspace_id, title="新對話") -> dict:
 def list_conversations(workspace_id) -> list[dict]:
     with _conn() as c:
         return c.execute(
-            "SELECT id,title,updated_at FROM conversations WHERE workspace_id=%s ORDER BY updated_at DESC",
+            "SELECT id,title,mode,model,updated_at FROM conversations WHERE workspace_id=%s ORDER BY updated_at DESC",
             (workspace_id,),
         ).fetchall()
 
@@ -188,6 +193,12 @@ def get_conversation(conversation_id):
         return c.execute(
             "SELECT * FROM conversations WHERE id=%s", (conversation_id,)
         ).fetchone()
+
+
+def set_conversation_mode(conversation_id, mode, model):
+    with _conn() as c:
+        c.execute("UPDATE conversations SET mode=%s, model=%s WHERE id=%s",
+                  (mode, model, conversation_id))
 
 
 def rename_conversation(conversation_id, title):

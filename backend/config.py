@@ -64,8 +64,8 @@ def create_model(profile: str | None = None, spec: dict | None = None, temperatu
     return build_chat_model(spec["base_url"], spec["model"], spec.get("api_key"), temperature)
 
 
-def list_gateway_models() -> list[str]:
-    """列出 gateway /v1/models 可用模型 id；失敗回空陣列。"""
+def list_gateway_models() -> dict:
+    """列出 gateway /v1/models。回 {models: [...], error: None|str}，讓前端能分辨『沒模型』與『連不到』。"""
     import httpx
 
     base = os.environ.get("LLM_BASE_URL", DEFAULT_BASE).rstrip("/")
@@ -74,9 +74,9 @@ def list_gateway_models() -> list[str]:
     try:
         r = client.get(base + "/models", headers={"Authorization": f"Bearer {key}"}, timeout=10)
         r.raise_for_status()
-        return [m["id"] for m in r.json().get("data", [])]
-    except Exception:
-        return []
+        return {"models": [m["id"] for m in r.json().get("data", [])], "error": None}
+    except Exception as e:
+        return {"models": [], "error": str(e)}
     finally:
         try: client.close()
         except Exception: pass

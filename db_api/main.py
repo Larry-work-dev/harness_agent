@@ -178,3 +178,12 @@ def get_model_profile(pid: int, user_id: int):
 @app.delete("/model-profiles/{pid}")
 def delete_model_profile(pid: int, user_id: int):
     store.delete_model_profile(pid, user_id); return {"ok": True}
+
+
+class ConvModeIn(BaseModel):
+    mode: str
+    model: str = "auto"
+
+@app.post("/conversations/{cid}/mode")
+def set_conversation_mode(cid: str, body: ConvModeIn):
+    store.set_conversation_mode(cid, body.mode, body.model); return {"ok": True}

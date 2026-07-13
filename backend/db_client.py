@@ -109,3 +109,7 @@ def get_model_profile(profile_id, user_id):
 
 def delete_model_profile(profile_id, user_id):
     _json(_client.delete(f"/model-profiles/{profile_id}", params={"user_id": user_id}))
+
+
+def set_conversation_mode(conversation_id, mode, model="auto"):
+    _json(_client.post(f"/conversations/{conversation_id}/mode", json={"mode": mode, "model": model}))

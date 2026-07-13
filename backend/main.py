@@ -50,7 +50,9 @@ class ConversationIn(BaseModel):
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
-    model: str | None = None            # 手動覆寫；None/"auto" = 自動路由
+class ModeIn(BaseModel):
+    mode: str                            # auto | manual
+    model: str = "auto"                  # manual 時的模型字串
 class ModelProfileIn(BaseModel):
     name: str; base_url: str; model: str; api_key: str | None = None
 
@@ -101,6 +103,12 @@ def get_messages(cid: str, user=Depends(current_user)):
 def remove_conversation(cid: str, user=Depends(current_user)):
     require_conversation(cid, user); db.delete_conversation(cid); return {"ok": True}
 
+@app.post("/conversations/{cid}/mode")
+def set_conversation_mode(cid: str, body: ModeIn, user=Depends(current_user)):
+    require_conversation(cid, user)
+    db.set_conversation_mode(cid, body.mode, body.model)
+    return {"ok": True}
+
 
 # ---- 記憶 ----
 @app.get("/memories")
@@ -123,9 +131,11 @@ def list_skills():
 @app.get("/models")
 def models(user=Depends(current_user)):
     """列出可選模型：內建分級 profile、gateway 上的模型、使用者自訂 profile。"""
+    gw = list_gateway_models()
     return {
         "profiles": PROFILES,                                  # local/cloud/mid/cheap
-        "gateway": list_gateway_models(),                      # /v1/models
+        "gateway": gw["models"],                               # /v1/models
+        "gateway_error": gw["error"],                          # 連不到時的錯誤訊息
         "custom": db.list_model_profiles(user["id"]),          # 個人自訂
     }
 
@@ -162,16 +172,16 @@ def resolve_override(user, model_str):
 # ---- 對話（核心：路由 + 兩層記憶）----
 @app.post("/chat")
 def chat(req: ChatRequest, user=Depends(current_user)):
-    require_conversation(req.conversation_id, user)
+    conv = require_conversation(req.conversation_id, user)
 
-    # 1) 路由決策（敏感守則最優先，連手動覆寫都蓋不過）
+    # 1) 路由決策：敏感守則最優先，其次看對話的 manual 設定，否則自動路由
     sensitive = router.detect_sensitive(req.message)
-    override = req.model and req.model not in ("", "auto")
+    manual = conv.get("mode") == "manual" and conv.get("model") not in (None, "", "auto")
     if sensitive:
         decision = {"mode": "generate", "profile": "local", "spec": None,
                     "reason": "含敏感資料，限本地模型", "label": "local"}
-    elif override:
-        r = resolve_override(user, req.model)
+    elif manual:
+        r = resolve_override(user, conv["model"])
         decision = {"mode": "generate", "profile": r.get("profile"), "spec": r.get("spec"),
                     "reason": "手動指定：" + r["label"], "label": r["label"]}
     else:

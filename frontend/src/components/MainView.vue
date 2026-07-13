@@ -15,9 +15,10 @@ const toastMsg = ref('')
 const streamEl = ref(null)
 let toastTimer
 
-// 模型選擇
-const models = ref({ profiles: [], gateway: [], custom: [] })
-const selectedModel = ref('auto')
+// 模型與對話模式
+const models = ref({ profiles: [], gateway: [], gateway_error: null, custom: [] })
+const convMode = ref('auto')          // 目前對話的模式 auto | manual
+const convModelSel = ref('auto')      // manual 時選的模型字串
 const showAddModel = ref(false)
 const cm = ref({ name: '', base_url: '', model: '', api_key: '' })
 
@@ -33,6 +34,18 @@ async function addCustomModel() {
   showAddModel.value = false
   await loadModels()
   toast('已新增自訂模型')
+}
+// 切換目前對話的模式並存回 DB
+async function setMode(mode) {
+  if (!conversationId.value) return
+  if (mode === 'manual' && (convModelSel.value === 'auto' || !convModelSel.value)) {
+    convModelSel.value = 'profile:' + (models.value.profiles[0] || 'cloud')  // 預設挑第一個
+  }
+  convMode.value = mode
+  const model = mode === 'manual' ? convModelSel.value : 'auto'
+  await api(`/conversations/${conversationId.value}/mode`, { method: 'POST', body: { mode, model } })
+  const cv = conversations.value.find(c => c.id === conversationId.value)
+  if (cv) { cv.mode = mode; cv.model = model }
 }
 
 function toast(msg) {
@@ -68,10 +81,15 @@ async function loadConversations() {
 }
 async function newConversation() {
   const cv = await api(`/workspaces/${workspaceId.value}/conversations`, { method: 'POST', body: {} })
-  conversationId.value = cv.id; items.value = []; await loadConversations()
+  conversationId.value = cv.id; items.value = []
+  convMode.value = 'auto'; convModelSel.value = 'auto'
+  await loadConversations()
 }
 async function selectConversation(cid) {
   conversationId.value = cid; items.value = []
+  const cv = conversations.value.find(c => c.id === cid)
+  convMode.value = cv?.mode || 'auto'
+  convModelSel.value = cv?.model || 'auto'
   const msgs = await api(`/conversations/${cid}/messages`)
   for (const m of msgs) {
     if (m.role === 'user') items.value.push({ kind: 'user', text: m.content, time: m.created_at })
@@ -104,7 +122,7 @@ async function send() {
     const res = await fetch(API + '/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token.value },
-      body: JSON.stringify({ conversation_id: conversationId.value, message: text, model: selectedModel.value }),
+      body: JSON.stringify({ conversation_id: conversationId.value, message: text }),
     })
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ''
     while (true) {
@@ -143,6 +161,13 @@ async function send() {
 function onEnter(e) { if (!e.shiftKey) { e.preventDefault(); send() } }
 function logout() { setToken(null) }
 
+function shortModel(m) {
+  if (!m || m === 'auto') return '自動'
+  const [k, v] = m.split(':')
+  if (k === 'custom') { const c = models.value.custom.find(x => String(x.id) === v); return c ? c.name : '自訂' }
+  return v || m
+}
+
 function formatTime(t) {
   if (!t) return ''
   const d = new Date(t), now = new Date()
@@ -178,20 +203,25 @@ async function copy(text, i) {
         <button class="icon" title="邀請成員" @click="invite">邀請</button>
       </div>
       <div class="spacer"></div>
-      <div class="model-pick">
-        <select v-model="selectedModel" class="model-sel" title="生成模型（自動路由或手動指定）">
-          <option value="auto">🧭 自動路由</option>
+      <div class="mode-pick" v-if="conversationId">
+        <div class="seg">
+          <button :class="{ active: convMode === 'auto' }" @click="setMode('auto')">🧭 自動</button>
+          <button :class="{ active: convMode === 'manual' }" @click="setMode('manual')">🔧 手動</button>
+        </div>
+        <select v-if="convMode === 'manual'" v-model="convModelSel" class="model-sel"
+                @change="setMode('manual')" title="這個對話使用的模型">
           <optgroup label="分級 profile">
             <option v-for="p in models.profiles" :key="p" :value="'profile:' + p">{{ p }}</option>
           </optgroup>
-          <optgroup label="Gateway 模型" v-if="models.gateway.length">
+          <optgroup label="Gateway 模型" v-if="models.gateway.length || models.gateway_error">
+            <option v-if="models.gateway_error" disabled>⚠ 連不到 gateway，請檢查憑證/連線</option>
             <option v-for="g in models.gateway" :key="g" :value="'gateway:' + g">{{ g }}</option>
           </optgroup>
           <optgroup label="自訂" v-if="models.custom.length">
             <option v-for="c in models.custom" :key="c.id" :value="'custom:' + c.id">{{ c.name }}</option>
           </optgroup>
         </select>
-        <button class="icon" title="新增自訂模型" @click="showAddModel = true">＋模型</button>
+        <button v-if="convMode === 'manual'" class="icon" title="新增自訂模型" @click="showAddModel = true">＋模型</button>
       </div>
       <button class="icon" @click="showMemory = true">🧠 記憶</button>
       <button class="icon" @click="logout">登出</button>
@@ -206,7 +236,10 @@ async function copy(text, i) {
                @click="selectConversation(cv.id)">
             <div class="conv-main">
               <span class="title">{{ cv.title }}</span>
-              <span class="conv-time">{{ formatTime(cv.updated_at) }}</span>
+              <span class="conv-meta">
+                <span class="badge">{{ cv.mode === 'manual' ? '🔧 ' + shortModel(cv.model) : '🧭 自動' }}</span>
+                <span class="conv-time">{{ formatTime(cv.updated_at) }}</span>
+              </span>
             </div>
             <button class="del" title="刪除" @click.stop="delConversation(cv.id)">×</button>
           </div>
@@ -288,8 +321,13 @@ async function copy(text, i) {
 .icon { background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); border-radius: 8px; padding: 6px 11px; font-size: 13px; }
 .icon:hover { color: var(--text); border-color: var(--agent); }
 .spacer { flex: 1; }
-.model-pick { display: flex; align-items: center; gap: 6px; }
-.model-sel { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-family: inherit; font-size: 13px; max-width: 180px; }
+.mode-pick { display: flex; align-items: center; gap: 6px; }
+.seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { background: var(--surface-2); border: none; color: var(--muted); padding: 6px 11px; font-size: 12.5px; }
+.seg button.active { background: color-mix(in srgb, var(--agent) 20%, var(--surface-2)); color: var(--text); }
+.model-sel { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-family: inherit; font-size: 13px; max-width: 170px; }
+.conv-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 2px; }
+.badge { font-size: 10.5px; color: var(--muted); font-family: var(--font-mono); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
 .routing { align-self: center; font-size: 11.5px; color: var(--muted); font-family: var(--font-mono); background: var(--surface-2); border: 1px solid var(--border); border-radius: 20px; padding: 3px 12px; }
 .modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 380px; max-width: 92vw; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; z-index: 50; padding: 22px; }
 .modal h3 { font-family: var(--font-display); font-size: 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
