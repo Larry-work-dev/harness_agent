@@ -1,4 +1,8 @@
 import { ref } from 'vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
+
+marked.setOptions({ gfm: true, breaks: true })
 
 // 同源部署（走 nginx 反代）用 ''；dev 由 vite proxy 代理
 export const API = ''
@@ -40,4 +44,16 @@ export function sourceListHTML(sources) {
     return `<div class="src"><span class="src-n">[${n}]</span>${inner}</div>`
   }).join('')
   return `<div class="sources"><div class="sources-title">來源</div>${items}</div>`
+}
+
+// 把 AI 回覆的 markdown 渲染成安全 HTML，並保留 [n] 引用連結
+export function renderMarkdown(content, sources = {}) {
+  let html = marked.parse(content ?? '')
+  html = html.replace(/\[(\d+)\]/g, (_, n) => {
+    const s = sources[n]; const t = s ? esc(s.name || '') : ''
+    if (s && s.url) return `<a class="cite" href="${esc(s.url)}" target="_blank" rel="noopener" title="${t}">[${n}]</a>`
+    return `<span class="cite" title="${t}">[${n}]</span>`
+  })
+  html += sourceListHTML(sources)
+  return DOMPurify.sanitize(html, { ADD_ATTR: ['target', 'rel', 'class', 'title'] })
 }

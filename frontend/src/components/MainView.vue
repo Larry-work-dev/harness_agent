@@ -1,6 +1,6 @@
 <script setup>
 import { ref, nextTick, onMounted } from 'vue'
-import { API, token, setToken, api, esc, renderCitations, sourceListHTML } from '../api.js'
+import { API, token, setToken, api, esc, renderCitations, renderMarkdown, sourceListHTML } from '../api.js'
 import MemoryPanel from './MemoryPanel.vue'
 
 const workspaces = ref([])
@@ -122,7 +122,7 @@ async function selectConversation(cid) {
     if (m.role === 'user') items.value.push({ kind: 'user', text: m.content, time: m.created_at })
     else {
       const sources = {}; (m.sources || []).forEach(s => (sources[s.n] = s))
-      items.value.push({ kind: 'agent', html: renderCitations(m.content, sources) + sourceListHTML(sources), text: m.content, time: m.created_at })
+      items.value.push({ kind: 'agent', html: renderMarkdown(m.content, sources), text: m.content, time: m.created_at })
     }
   }
   scrollDown()
@@ -169,7 +169,7 @@ async function send() {
           const t = (pending[ev.skill] || []).shift(); if (t) t.result = ev.result
           if (ev.sources) ev.sources.forEach(s => (sources[s.n] = s))
         } else if (ev.type === 'final') {
-          items.value.push({ kind: 'agent', html: renderCitations(ev.content, sources) + sourceListHTML(sources), text: ev.content, time: new Date().toISOString() })
+          items.value.push({ kind: 'agent', html: renderMarkdown(ev.content, sources), text: ev.content, time: new Date().toISOString() })
         } else if (ev.type === 'memory_saved') {
           toast('🧠 已記住：' + ev.items.join('、'))
         } else if (ev.type === 'error') {
@@ -400,6 +400,24 @@ main { display: flex; flex-direction: column; overflow: hidden; }
 .avatar.user { background: var(--surface-2); color: var(--muted); }
 .bubble { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 15px; white-space: pre-wrap; word-break: break-word; }
 .row.user .bubble { background: var(--surface-2); border-color: transparent; }
+
+/* AI 泡泡內的 markdown 排版 */
+.bubble :first-child { margin-top: 0; }
+.bubble :last-child { margin-bottom: 0; }
+.bubble h1, .bubble h2, .bubble h3 { font-family: var(--font-display); line-height: 1.3; margin: 14px 0 8px; }
+.bubble h1 { font-size: 1.3em; } .bubble h2 { font-size: 1.18em; } .bubble h3 { font-size: 1.06em; }
+.bubble p { margin: 8px 0; }
+.bubble ul, .bubble ol { margin: 8px 0; padding-left: 1.4em; }
+.bubble li { margin: 3px 0; }
+.bubble code { background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; font-family: var(--font-mono); font-size: .88em; }
+.bubble pre { background: #0B0E14; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; overflow-x: auto; margin: 10px 0; }
+.bubble pre code { background: none; border: none; padding: 0; font-size: .86em; line-height: 1.5; }
+.bubble blockquote { border-left: 3px solid var(--border); margin: 10px 0; padding: 2px 0 2px 12px; color: var(--muted); }
+.bubble a { color: var(--agent); text-decoration: none; }
+.bubble a:hover { text-decoration: underline; }
+.bubble table { border-collapse: collapse; margin: 10px 0; font-size: .92em; }
+.bubble th, .bubble td { border: 1px solid var(--border); padding: 5px 10px; }
+.bubble hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 
 .trace { font-family: var(--font-mono); font-size: 12.5px; background: color-mix(in srgb, var(--skill) 7%, var(--surface)); border: 1px solid color-mix(in srgb, var(--skill) 28%, var(--border)); border-left: 2.5px solid var(--skill); border-radius: 8px; padding: 9px 13px; max-width: 780px; align-self: flex-start; margin-left: 43px; }
 .trace .call { color: var(--skill); }

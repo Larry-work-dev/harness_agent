@@ -52,7 +52,9 @@ def resolve_override(user, model_str):
 def chat(req: ChatRequest, user=Depends(current_user)):
     conv = require_conversation(req.conversation_id, user)
 
-    # 1) 路由決策：敏感守則最優先，其次看對話 manual 設定，否則自動路由
+    embedder = create_embedder()   # 語意意圖比對 + 記憶召回共用
+
+    # 1) 路由決策：敏感守則最優先，其次看對話 manual 設定，否則自動路由（語意比對意圖）
     sensitive = routing.detect_sensitive(req.message)
     manual = conv.get("mode") == "manual" and conv.get("model") not in (None, "", "auto")
     if sensitive:
@@ -63,7 +65,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         decision = {"mode": "generate", "profile": r.get("profile"), "spec": r.get("spec"),
                     "reason": "手動指定：" + r["label"], "label": r["label"]}
     else:
-        d = routing.route(req.message)
+        d = routing.route(req.message, embedder=embedder)
         decision = {**d, "spec": None, "label": d.get("profile") or d.get("workflow")}
 
     print(f"[chat] conv.mode={conv.get('mode')!r} conv.model={conv.get('model')!r} "
@@ -94,7 +96,6 @@ def chat(req: ChatRequest, user=Depends(current_user)):
 
             summary, recent = memory.build_context(req.conversation_id)
             recent = recent[:-1] if recent else recent
-            embedder = create_embedder()
             memory_text = memory.recall(embedder, user["id"], req.message)
             hist = ([{"role": "system", "content": "以下是先前對話的摘要：\n" + summary}] if summary else []) + recent
 
