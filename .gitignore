@@ -5,3 +5,4 @@ __pycache__/
 backend/.env
 db_api/.env
 .vscode/
+tmp/
