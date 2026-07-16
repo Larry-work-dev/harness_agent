@@ -116,41 +116,16 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         yield sse({"type": "routing", "mode": "composite",
                    "model": f"複合任務 {len(subtasks)} 步", "actual_model": None,
                    "reason": "Orchestrator 拆解並分派 sub-agents"})
-                   
-        # === 新增：提取歷史對話與記憶 ===
-        summary, recent = memory.build_context(req.conversation_id)
-        recent = recent[:-1] if recent else recent
-        memory_text = memory.recall(embedder, user["id"], req.message)
-        
-        hist_context = ""
-        if summary:
-            hist_context += f"\n[歷史對話摘要]\n{summary}\n"
-        if memory_text:
-            hist_context += f"\n[相關背景記憶]\n{memory_text}\n"
-        if recent:
-            hist_context += "\n[近期對話紀錄]\n"
-            for m in recent:
-                role = "User" if m.get("role") == "user" else "Assistant"
-                content = m.get("content", "")
-                hist_context += f"{role}: {content}\n"
-                
-        # 將對話歷史與原本的 system prompt 結合
-        enhanced_claude = claude + hist_context
-
         results = []; prior = ""
         for sub in subtasks:
             primary, _fb = cfg.primary_model(sub["task_type"])
             yield sse({"type": "skill_call", "skill": sub["task_type"],
                        "args": {"desc": sub["desc"], "model": primary}})
-                       
-            # 傳遞 enhanced_claude，讓 sub-agent 具備全局上下文
-            mid, out = orchestrator.run_subtask(sub, prior, enhanced_claude)
+            mid, out = orchestrator.run_subtask(sub, prior, claude)
             yield sse({"type": "skill_result", "skill": sub["task_type"], "result": out})
             results.append({"task_type": sub["task_type"], "output": out})
             prior += f"\n[{sub['task_type']}] {out}"
-            
-        # 組裝階段同樣具備完整對話歷史
-        final = orchestrator.assemble(req.message, results, enhanced_claude)
+        final = orchestrator.assemble(req.message, results, claude)
         db.add_message(req.conversation_id, "assistant", final)
         yield sse({"type": "final", "content": final})
         try:
@@ -174,7 +149,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                     yield sse({"type": "done"}); return
                 tt = plan["task_type"]
                 primary, _fb = cfg.primary_model(tt)
-                decision["spec"] = cfg.model_spec(str(primary))
+                decision["spec"] = cfg.model_spec(primary)
                 decision["label"] = primary
                 decision["reason"] = f"查路由表：{tt} → {primary}"
                 mode = "generate"

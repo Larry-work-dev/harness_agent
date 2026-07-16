@@ -23,8 +23,8 @@ _SENSITIVE_PATTERNS = [
 ]
 _SENSITIVE_WORDS = ["機密", "密件", "薪資", "salary", "confidential", "病歷", "身分證"]
 
-# 複雜度啟發式
-_TOOL_HINTS = ["查", "檢索", "搜尋", "寄", "email", "計算", "分析", "整理", "報告", "程式", "code"]
+# 複合任務的判斷與 task_type 分類已移到 orchestrator（便宜 LLM 分類）+ routing_table。
+# routing 只保留規則式的「敏感」與語意式的「意圖」。
 
 # workflow 意圖比對的相似度門檻（可用環境變數調）
 WF_MATCH_THRESHOLD = float(os.environ.get("WF_MATCH_THRESHOLD", "0.62"))
@@ -85,22 +85,15 @@ def match_workflow(text: str, embedder=None) -> str | None:
     return best_name if best_sim >= WF_MATCH_THRESHOLD else None
 
 
-def classify_complexity(text: str) -> str:
-    n = len(text)
-    needs_tool = any(h.lower() in text.lower() for h in _TOOL_HINTS)
-    if needs_tool or n > 200:
-        return "cloud"
-    if n > 60:
-        return "mid"
+def classify_complexity(text: str) -> str:  # 保留相容，已不用於路由
     return "cheap"
 
 
 def route(text: str, embedder=None) -> dict:
-    """自動路由決策（不含手動覆寫；覆寫在 chat 處理，但敏感守則仍最優先）。"""
+    """規則+意圖層決策。複雜度分級已移除；開放式任務改由 orchestrator 查路由表。"""
     if detect_sensitive(text):
         return {"mode": "generate", "profile": "local", "reason": "含敏感資料，限本地模型"}
     wf = match_workflow(text, embedder)
     if wf:
         return {"mode": "workflow", "workflow": wf, "reason": "命中既有意圖"}
-    profile = classify_complexity(text)
-    return {"mode": "generate", "profile": profile, "reason": f"自動分級 → {profile}"}
+    return {"mode": "auto_route", "reason": "開放式任務，查路由表"}

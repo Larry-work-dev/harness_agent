@@ -89,8 +89,11 @@ class Harness:
         user_message: str,
         history: list[dict] | None = None,
         memory_context: str | None = None,
+        extra_system: str | None = None,
     ) -> Iterator[dict]:
         system = self.system_prompt()
+        if extra_system:
+            system += "\n\n" + extra_system
         if memory_context:
             system += (
                 "\n\n關於這位使用者你已知道的事（可作為回答的參考，但不要生硬複述）：\n"

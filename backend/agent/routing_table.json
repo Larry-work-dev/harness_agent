@@ -1,0 +1,108 @@
+{
+  "version": "0.1",
+  "source": "模型評測機制規劃報告-0703",
+  "generated_for": "model-routing POC",
+  "score_scale": "0-100 (原始分 ÷ 滿分 × 100)",
+  "baseline": {
+    "model": "Qwen3-VL",
+    "total": 89,
+    "replacement_rule": "候選新模型在每個情境的分數須 >= Qwen3-VL 對應情境分數 × 0.95"
+  },
+  "notes": [
+    "routing_table 依『各情境挑分數最高的模型』推導；fallback 取第二名。",
+    "語意分析情境四模型同分 100，tie=true，POC 時請用成本/延遲擇一。"
+  ],
+  "models": [
+    { "id": "Qwen3-VL",     "hosting": "local" },
+    { "id": "gpt-5.4",      "hosting": "cloud" },
+    { "id": "gpt-4.1",      "hosting": "cloud" },
+    { "id": "grok-4.3",     "hosting": "cloud" },
+    { "id": "google/gemma-4-31B-it",  "hosting": "local" }
+  ],
+  "scores": {
+    "OCR":       { "Qwen3-VL": 94,  "GPT-5.4": 85,  "GPT-4.1": 73,  "Grok-4.3": 98, "Gemma-4-31B": 74 },
+    "文件翻譯":   { "Qwen3-VL": 75,  "GPT-5.4": 83,  "GPT-4.1": 82,  "Grok-4.3": 72, "Gemma-4-31B": 70 },
+    "語意分析":   { "Qwen3-VL": 100, "GPT-5.4": 100, "GPT-4.1": 100, "Grok-4.3": 62, "Gemma-4-31B": 100 },
+    "圖面理解":   { "Qwen3-VL": 90,  "GPT-5.4": 82,  "GPT-4.1": 82,  "Grok-4.3": 85, "Gemma-4-31B": 78 },
+    "RAG切片":    { "Qwen3-VL": 88,  "GPT-5.4": 85,  "GPT-4.1": 91,  "Grok-4.3": 83, "Gemma-4-31B": 85 }
+  },
+  "routing_table": [
+    {
+      "task_type": "OCR",
+      "primary": "grok-4.3",
+      "primary_score": 98,
+      "fallback": "Qwen3-VL",
+      "fallback_score": 94,
+      "tie": false,
+      "candidates_ranked": [
+        { "model": "Grok-4.3", "score": 98 },
+        { "model": "Qwen3-VL", "score": 94 },
+        { "model": "gpt-5.4", "score": 85 },
+        { "model": "google/gemma-4-31B-it", "score": 74 },
+        { "model": "gpt-4.1", "score": 73 }
+      ]
+    },
+    {
+      "task_type": "文件翻譯",
+      "primary": "gpt-5.4",
+      "primary_score": 83,
+      "fallback": "gpt-4.1",
+      "fallback_score": 82,
+      "tie": false,
+      "candidates_ranked": [
+        { "model": "gpt-5.4", "score": 83 },
+        { "model": "gpt-4.1", "score": 82 },
+        { "model": "Qwen3-VL", "score": 75 },
+        { "model": "grok-4.3", "score": 72 },
+        { "model": "google/gemma-4-31B-it", "score": 70 }
+      ]
+    },
+    {
+      "task_type": "語意分析",
+      "primary": "Qwen3-VL",
+      "primary_score": 100,
+      "fallback": "gpt-5.4",
+      "fallback_score": 100,
+      "tie": true,
+      "tie_candidates": ["Qwen3-VL", "gpt-5.4", "gpt-4.1", "google/gemma-4-31B-it"],
+      "tie_note": "四模型同分 100，primary 暫以基準模型 Qwen3-VL 代入，POC 時請依成本/延遲擇一。",
+      "candidates_ranked": [
+        { "model": "Qwen3-VL", "score": 100 },
+        { "model": "gpt-5.4", "score": 100 },
+        { "model": "gpt-4.1", "score": 100 },
+        { "model": "google/gemma-4-31B-it", "score": 100 },
+        { "model": "grok-4.3", "score": 62 }
+      ]
+    },
+    {
+      "task_type": "圖面理解",
+      "primary": "Qwen3-VL",
+      "primary_score": 90,
+      "fallback": "grok-4.3",
+      "fallback_score": 85,
+      "tie": false,
+      "candidates_ranked": [
+        { "model": "Qwen3-VL", "score": 90 },
+        { "model": "grok-4.3", "score": 85 },
+        { "model": "gpt-5.4", "score": 82 },
+        { "model": "gpt-4.1", "score": 82 },
+        { "model": "google/gemma-4-31B-it", "score": 78 }
+      ]
+    },
+    {
+      "task_type": "RAG切片",
+      "primary": "gpt-4.1",
+      "primary_score": 91,
+      "fallback": "Qwen3-VL",
+      "fallback_score": 88,
+      "tie": false,
+      "candidates_ranked": [
+        { "model": "gpt-4.1", "score": 91 },
+        { "model": "Qwen3-VL", "score": 88 },
+        { "model": "gpt-5.4", "score": 85 },
+        { "model": "google/gemma-4-31B-it", "score": 85 },
+        { "model": "grok-4.3", "score": 83 }
+      ]
+    }
+  ]
+}
