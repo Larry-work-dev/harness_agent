@@ -17,5 +17,13 @@ WORKFLOW = Workflow(
     name="leave_request",
     description="請假申請的既定流程。",
     triggers=["請假", "休假", "特休", "事假", "病假"],
+    examples=[
+        "我要請假",
+        "幫我請三天特休",
+        "我想申請病假",
+        "下週一我要休假，幫我送假單",
+        "我要請事假一天",
+        "幫我跑請假流程",
+    ],
     run=_run,
 )

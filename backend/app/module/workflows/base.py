@@ -14,5 +14,6 @@ from typing import Callable
 class Workflow:
     name: str
     description: str
-    triggers: list[str]                 # 命中這些關鍵字就觸發（之後可換語意比對）
+    triggers: list[str]                 # 關鍵字（語意服務不可用時的退回比對）
     run: Callable[[str], str]           # 輸入使用者訊息，回傳最終回應文字
+    examples: list[str] = field(default_factory=list)  # 意圖範例句（語意比對優先用這個）

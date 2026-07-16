@@ -14,10 +14,20 @@ import re
 
 from app.config import create_model
 from app.module import agent_config as cfg
+from app.module.skills.knowledge_search import _knowledge_search
 
 # 分類器用的模型（預設本地 baseline；可用環境變數指定）
 import os
 _CLASSIFIER_MODEL = os.environ.get("AGENT_CLASSIFIER_MODEL") or cfg.local_default()
+
+# 這些任務類型需要「查公司知識庫」——sub-agent 會先呼叫 RAG 再交給模型（不需 gateway tool-calling）
+RETRIEVAL_TASK_TYPES = {t.strip() for t in
+                        os.environ.get("RETRIEVAL_TASK_TYPES", "RAG切片").split(",") if t.strip()}
+
+
+def retrieve(query: str) -> tuple[str, list]:
+    """呼叫公司知識庫（RAG），回 (檢索內容, 來源清單)。失敗時回錯誤訊息與空來源。"""
+    return _knowledge_search(query)
 
 
 def _parse_json(text: str) -> dict:
@@ -51,11 +61,18 @@ def classify(text: str) -> dict:
     return {"composite": False, "task_type": default_tt}
 
 
-def run_subtask(sub: dict, prior: str, claude: str) -> tuple[str, str]:
-    """執行單一子任務：查表取模型（主→fallback），回 (實際模型, 產出)。"""
+def run_subtask(sub: dict, prior: str, claude: str) -> tuple[str, str, list]:
+    """執行單一子任務。檢索型（RAG切片）先查公司知識庫再交模型；回 (模型, 產出, 來源)。"""
     tt, desc = sub["task_type"], sub["desc"]
+    retrieved, sources = "", []
+    if tt in RETRIEVAL_TASK_TYPES:
+        q = desc if not prior else f"{desc}（脈絡：{prior[:400]}）"
+        retrieved, sources = retrieve(q)
+
     primary, fallback = cfg.primary_model(tt)
     prompt = f"{claude}\n\n[子任務類型] {tt}\n[要完成的事] {desc}\n"
+    if retrieved:
+        prompt += (f"\n[公司知識庫檢索結果，請只根據這些內容，並用 [n] 標註來源]\n{retrieved}\n")
     if prior:
         prompt += f"\n[前面步驟的結果，供你參考]\n{prior}\n"
     prompt += "\n請只完成這個子任務，直接給出結果。"
@@ -63,10 +80,10 @@ def run_subtask(sub: dict, prior: str, claude: str) -> tuple[str, str]:
         try:
             out = create_model(spec=cfg.model_spec(mid)).invoke(
                 [{"role": "user", "content": prompt}]).content
-            return mid, out
+            return mid, out, sources
         except Exception:
             continue
-    return primary, "（此子任務執行失敗）"
+    return primary, "（此子任務執行失敗）", sources
 
 
 def assemble(original: str, results: list[dict], claude: str) -> str:

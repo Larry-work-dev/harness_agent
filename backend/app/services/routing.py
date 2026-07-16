@@ -53,18 +53,23 @@ def _match_keyword(text: str) -> str | None:
     return None
 
 
+def _phrases(wf) -> list[str]:
+    """語意比對用的句子：優先用意圖範例句，沒有才退回關鍵字。"""
+    return wf.examples or wf.triggers
+
+
 def _ensure_trigger_embeddings(embedder) -> None:
-    """把所有 workflow 的 trigger 批次 embed 進快取（只算沒算過的）。"""
-    missing = [t for wf in load_workflows() for t in wf.triggers if t not in _trigger_emb]
+    """把所有 workflow 的意圖範例句批次 embed 進快取（只算沒算過的）。"""
+    missing = [p for wf in load_workflows() for p in _phrases(wf) if p not in _trigger_emb]
     if not missing:
         return
     embs = embedder.embed_documents(missing)
-    for t, e in zip(missing, embs):
-        _trigger_emb[t] = e
+    for p, e in zip(missing, embs):
+        _trigger_emb[p] = e
 
 
 def match_workflow(text: str, embedder=None) -> str | None:
-    """意圖比對：有 embedder 走語意、否則走關鍵字；embedding 失敗自動退回關鍵字。"""
+    """意圖比對：有 embedder 走語意（比對意圖範例句）、否則關鍵字；embedding 失敗自動退回關鍵字。"""
     if embedder is None:
         return _match_keyword(text)
     try:
@@ -75,8 +80,8 @@ def match_workflow(text: str, embedder=None) -> str | None:
 
     best_name, best_sim = None, -1.0
     for wf in load_workflows():
-        for trig in wf.triggers:
-            emb = _trigger_emb.get(trig)
+        for phrase in _phrases(wf):
+            emb = _trigger_emb.get(phrase)
             if emb is None:
                 continue
             sim = _cosine(q, emb)

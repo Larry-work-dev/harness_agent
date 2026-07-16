@@ -152,8 +152,11 @@ def chat(req: ChatRequest, user=Depends(current_user)):
             primary, _fb = cfg.primary_model(sub["task_type"])
             yield sse({"type": "skill_call", "skill": sub["task_type"],
                        "args": {"desc": sub["desc"], "model": primary}})
-            mid, out = orchestrator.run_subtask(sub, prior, ctx)
-            yield sse({"type": "skill_result", "skill": sub["task_type"], "result": out})
+            mid, out, srcs = orchestrator.run_subtask(sub, prior, ctx)
+            ev = {"type": "skill_result", "skill": sub["task_type"], "result": out}
+            if srcs:
+                ev["sources"] = srcs
+            yield sse(ev)
             results.append({"task_type": sub["task_type"], "output": out})
             prior += f"\n[{sub['task_type']}] {out}"
         final = orchestrator.assemble(req.message, results, ctx)
@@ -200,6 +203,11 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                     yield sse({"type": "done"}); return
                 tt = plan["task_type"]
                 primary, _fb = cfg.primary_model(tt)
+                # 單一檢索型任務（RAG切片）：先查公司知識庫，注入脈絡再生成
+                if tt in orchestrator.RETRIEVAL_TASK_TYPES:
+                    content, _srcs = orchestrator.retrieve(req.message)
+                    if content:
+                        ctx += "\n\n[公司知識庫檢索結果，請據此回答並用 [n] 標註來源]\n" + content
                 decision["spec"] = cfg.model_spec(primary)
                 decision["label"] = primary
                 decision["reason"] = f"查路由表：{tt} → {primary}"
