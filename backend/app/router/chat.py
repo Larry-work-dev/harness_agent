@@ -64,21 +64,36 @@ def chat(req: ChatRequest, user=Depends(current_user)):
     images = [a for a in atts if a.get("kind") == "image"]
     docs = [a for a in atts if a.get("kind") == "doc"]
 
-    # 1) 決策：圖片 > 敏感 > 手動 > 自動
+    # 1) 決策：手動 > 圖片(白名單) > 敏感 > 自動
+    #    manual＝使用者說了算：照送指定模型（含圖也送給它）、不 fallback、失敗回真錯誤。
+    #    auto＝系統保護：敏感走本地、圖走視覺白名單（含 fallback）。
     sensitive = routing.detect_sensitive(req.message)
     manual = conv.get("mode") == "manual" and conv.get("model") not in (None, "", "auto")
-    if images:
-        mid = cfg.local_default()
-        decision = {"mode": "vision", "profile": None, "spec": cfg.model_spec(mid),
-                    "reason": "含圖片，使用視覺模型", "label": mid}
+    if manual:
+        r = resolve_override(user, conv["model"])
+        if images:
+            spec = r.get("spec") or profile_spec(r.get("profile"))
+            decision = {"mode": "vision", "profile": None, "spec": spec, "fallback_spec": None,
+                        "task_type": "manual", "label": r["label"],
+                        "reason": f"手動指定（含圖，照送不 fallback）：{r['label']}"}
+        else:
+            decision = {"mode": "generate", "profile": r.get("profile"), "spec": r.get("spec"),
+                        "reason": "手動指定：" + r["label"], "label": r["label"]}
+    elif images:
+        itask = orchestrator.classify_image_task(req.message)
+        if sensitive:
+            primary, fallback = cfg.primary_vision_model(itask, local_only=True)
+            reason = f"含圖片且敏感（{itask}）→ 本地視覺模型 {primary}"
+        else:
+            primary, fallback = cfg.primary_vision_model(itask)
+            reason = f"含圖片（{itask}）→ 依路由表+視覺白名單 {primary}"
+        decision = {"mode": "vision", "profile": None, "spec": cfg.model_spec(primary),
+                    "fallback_spec": cfg.model_spec(fallback), "task_type": itask,
+                    "reason": reason, "label": primary}
     elif sensitive:
         mid = cfg.local_default()
         decision = {"mode": "generate", "profile": None, "spec": cfg.model_spec(mid),
                     "reason": "含敏感資料，限本地模型", "label": mid}
-    elif manual:
-        r = resolve_override(user, conv["model"])
-        decision = {"mode": "generate", "profile": r.get("profile"), "spec": r.get("spec"),
-                    "reason": "手動指定：" + r["label"], "label": r["label"]}
     else:
         d = routing.route(req.message, embedder=embedder)
         decision = {**d, "spec": None, "label": d.get("workflow") or "路由中"}
@@ -181,8 +196,26 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                                "image_url": {"url": att.image_data_url(a["path"], a.get("mime", ""))}})
             except Exception:
                 continue
-        model = create_model(spec=decision["spec"], temperature=0.0)
-        out = model.invoke([SystemMessage(content=ctx), HumanMessage(content=blocks)]).content
+        specs = [decision["spec"]]
+        fb = decision.get("fallback_spec")
+        if fb and fb.get("model") != decision["spec"].get("model"):
+            specs.append(fb)
+        out, err = None, None
+        for sp in specs:
+            try:
+                out = create_model(spec=sp, temperature=0.0).invoke(
+                    [SystemMessage(content=ctx), HumanMessage(content=blocks)]).content
+                if sp is not specs[0]:
+                    log.info("vision: 主模型失敗，改用 fallback %s", sp.get("model"))
+                break
+            except Exception as e:  # noqa: BLE001
+                err = e
+                log.warning("vision: 模型 %s 失敗(%s)", sp.get("model"), e)
+        if out is None:
+            # 手動模式或全部失敗：把真正的錯誤丟回給使用者
+            yield sse({"type": "error",
+                       "message": f"模型 {specs[-1].get('model')} 呼叫失敗：{err}"})
+            return
         db.add_message(req.conversation_id, "assistant", out)
         yield sse({"type": "final", "content": out})
         try:

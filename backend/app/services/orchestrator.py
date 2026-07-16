@@ -68,6 +68,27 @@ def classify(text: str) -> dict:
     return {"composite": False, "task_type": default_tt}
 
 
+def classify_image_task(text: str) -> str:
+    """判斷附圖需求是 OCR（抽文字）還是 圖面理解（理解內容）。便宜 LLM；失敗預設圖面理解。"""
+    types = cfg.valid_task_types()
+    img_types = [t for t in ("OCR", "圖面理解") if t in types] or ["圖面理解"]
+    prompt = (f"使用者上傳了圖片並說：「{text or '（沒有文字，只有圖）'}」。\n"
+              "這個需求比較接近哪一種？只回一個詞：\n"
+              "- OCR：主要是要抽取／辨識圖片中的文字\n"
+              "- 圖面理解：要理解圖表、照片、示意圖的內容或含義\n"
+              "只輸出 OCR 或 圖面理解，不要其他字。")
+    try:
+        out = create_model(spec=cfg.model_spec(_CLASSIFIER_MODEL or cfg.local_default())).invoke(
+            [{"role": "user", "content": prompt}]).content.strip()
+        for t in img_types:
+            if t in out:
+                log.info("classify_image_task → %s", t)
+                return t
+    except Exception as e:  # noqa: BLE001
+        log.warning("classify_image_task 失敗(%s)，預設 圖面理解", e)
+    return "圖面理解" if "圖面理解" in img_types else img_types[0]
+
+
 def run_subtask(sub: dict, prior: str, claude: str) -> tuple[str, str, list]:
     """執行單一子任務。檢索型（RAG切片）先查公司知識庫再交模型；回 (模型, 產出, 來源)。"""
     tt, desc = sub["task_type"], sub["desc"]

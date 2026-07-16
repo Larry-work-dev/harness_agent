@@ -25,6 +25,9 @@ def _setup() -> None:
         stream=sys.stdout,
     )
     _configured = True
+    # 第三方 logger 降到 WARNING，只讓 harness.* 的 INFO 顯示（否則 httpx 每次呼叫都洗版）
+    for noisy in ("httpx", "httpcore", "urllib3", "openai", "uvicorn.access"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def get(component: str) -> logging.Logger:

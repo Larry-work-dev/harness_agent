@@ -92,6 +92,39 @@ def primary_model(task_type: str, local_only: bool = False) -> tuple[str, str]:
     return p, f
 
 
+def vision_models() -> set[str]:
+    """支援 vision（能吃圖）的模型白名單。
+
+    優先用環境變數 VISION_MODELS（逗號分隔）；未設時從路由表推導：
+    baseline（Qwen3-VL）＋ OCR/圖面理解 這兩個影像任務的 primary。
+    ⚠ 白名單內的模型必須在你 gateway 上真的支援 vision，否則呼叫會失敗（會退 fallback）。
+    """
+    raw = os.environ.get("VISION_MODELS")
+    if raw:
+        return {m.strip() for m in raw.split(",") if m.strip()}
+    vm = {local_default()}
+    for tt in ("OCR", "圖面理解"):
+        p = _row(tt).get("primary")
+        if p:
+            vm.add(p)
+    return {m for m in vm if m}
+
+
+def primary_vision_model(task_type: str, local_only: bool = False) -> tuple[str, str]:
+    """在『視覺白名單』內，挑該任務類型分數最高的 (primary, fallback)。
+
+    local_only=True 時再收斂成只挑白名單裡 hosting=local 的（敏感資料用）。
+    白名單內沒有可用者 → 退回 local_default（Qwen3-VL）。
+    """
+    vm = vision_models()
+    ranked = [c["model"] for c in (_row(task_type).get("candidates_ranked") or [])
+              if c["model"] in vm and (not local_only or model_hosting(c["model"]) == "local")]
+    if ranked:
+        return ranked[0], (ranked[1] if len(ranked) > 1 else ranked[0])
+    ld = local_default()
+    return ld, ld
+
+
 def model_spec(model_id: str) -> dict:
     """把路由表的模型 id 轉成呼叫 gateway 用的 spec（gateway 依 model 名分流）。"""
     return {
