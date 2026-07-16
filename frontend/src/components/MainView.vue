@@ -1,6 +1,6 @@
 <script setup>
 import { ref, nextTick, onMounted } from 'vue'
-import { API, token, setToken, api, esc, renderCitations, renderMarkdown, sourceListHTML } from '../api.js'
+import { API, token, setToken, api, esc, renderCitations, renderMarkdown, sourceListHTML, uploadFiles } from '../api.js'
 import MemoryPanel from './MemoryPanel.vue'
 
 const workspaces = ref([])
@@ -10,6 +10,9 @@ const conversationId = ref(null)
 const items = ref([])          // 對話串流：user / trace / agent / routing
 const input = ref('')
 const sending = ref(false)
+const attachments = ref([])   // 已上傳待送出的附件
+const uploading = ref(false)
+const fileInput = ref(null)
 const showMemory = ref(false)
 const toastMsg = ref('')
 const streamEl = ref(null)
@@ -134,14 +137,30 @@ async function delConversation(cid) {
   await loadConversations()
 }
 
+async function onFiles(e) {
+  const files = Array.from(e.target.files || []); e.target.value = ''
+  if (!files.length) return
+  if (!conversationId.value) {
+    const cv = await api(`/workspaces/${workspaceId.value}/conversations`, { method: 'POST', body: {} })
+    conversationId.value = cv.id; await loadConversations()
+  }
+  uploading.value = true
+  try {
+    const r = await uploadFiles(files, conversationId.value)
+    for (const a of r.attachments) attachments.value.push(a)
+  } catch (err) { toast('上傳失敗：' + err.message) }
+  finally { uploading.value = false }
+}
+
 async function send() {
-  const text = input.value.trim(); if (!text || sending.value) return
+  const text = input.value.trim(); if ((!text && !attachments.value.length) || sending.value) return
   if (!conversationId.value) {
     const cv = await api(`/workspaces/${workspaceId.value}/conversations`, { method: 'POST', body: {} })
     conversationId.value = cv.id
   }
-  input.value = ''; sending.value = true
-  items.value.push({ kind: 'user', text, time: new Date().toISOString() })
+  const atts = attachments.value.slice()
+  input.value = ''; attachments.value = []; sending.value = true
+  items.value.push({ kind: 'user', text, attachments: atts, time: new Date().toISOString() })
   scrollDown()
 
   const pending = {}, sources = {}
@@ -149,7 +168,7 @@ async function send() {
     const res = await fetch(API + '/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token.value },
-      body: JSON.stringify({ conversation_id: conversationId.value, message: text }),
+      body: JSON.stringify({ conversation_id: conversationId.value, message: text, attachments: atts }),
     })
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ''
     while (true) {
@@ -286,7 +305,10 @@ async function copy(text, i) {
             <div v-if="it.kind === 'user'" class="row user">
               <div class="avatar user">你</div>
               <div class="col">
-                <div class="bubble">{{ it.text }}</div>
+                <div class="bubble" v-if="it.text">{{ it.text }}</div>
+                <div v-if="it.attachments && it.attachments.length" class="msg-atts">
+                  <span v-for="(a, ai) in it.attachments" :key="ai" class="msg-att">{{ a.kind === 'image' ? '🖼' : '📄' }} {{ a.name }}</span>
+                </div>
                 <div class="time">{{ formatTime(it.time) }}</div>
               </div>
             </div>
@@ -311,7 +333,17 @@ async function copy(text, i) {
         </div>
 
         <div class="composer">
+          <div v-if="attachments.length || uploading" class="atts">
+            <div v-for="(a, i) in attachments" :key="i" class="att">
+              <span class="att-ic">{{ a.kind === 'image' ? '🖼' : '📄' }}</span>
+              <span class="att-nm">{{ a.name }}</span>
+              <button class="att-x" @click="attachments.splice(i, 1)">×</button>
+            </div>
+            <span v-if="uploading" class="att uploading">上傳中…</span>
+          </div>
           <div class="box">
+            <button class="attach" title="附加圖片或文件" @click="fileInput.click()">📎</button>
+            <input ref="fileInput" type="file" multiple accept="image/*,.pdf,.docx,.txt,.md" style="display:none" @change="onFiles" />
             <textarea v-model="input" rows="1" placeholder="輸入訊息，Enter 送出、Shift+Enter 換行"
                       @keydown.enter="onEnter"></textarea>
             <button class="send" :disabled="sending" @click="send">
@@ -426,6 +458,17 @@ main { display: flex; flex-direction: column; overflow: hidden; }
 .trace .result::before { content: "→ "; color: var(--success); }
 
 .composer { border-top: 1px solid var(--border); padding: 16px 26px 20px; }
+.atts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.att { display: flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-size: 12.5px; }
+.att-ic { font-size: 13px; }
+.att-nm { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-x { background: none; border: none; color: var(--muted); font-size: 15px; line-height: 1; }
+.att-x:hover { color: var(--danger); }
+.att.uploading { color: var(--muted); }
+.attach { background: none; border: none; color: var(--muted); font-size: 18px; padding: 0 4px; align-self: flex-end; }
+.attach:hover { color: var(--agent); }
+.msg-atts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.msg-att { background: var(--surface-2); border: 1px solid var(--border); border-radius: 7px; padding: 3px 8px; font-size: 12px; color: var(--muted); }
 .box { max-width: 806px; display: flex; gap: 10px; align-items: flex-end; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 8px 8px 8px 16px; margin: 0 auto; }
 .box:focus-within { border-color: var(--agent); }
 textarea { flex: 1; background: none; border: none; color: var(--text); font-family: inherit; font-size: 15px; resize: none; max-height: 160px; line-height: 1.5; padding: 6px 0; }

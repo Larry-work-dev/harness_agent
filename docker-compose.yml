@@ -14,7 +14,9 @@ services:
   backend:
     container_name: harness-backend 
     build: ./backend
-    env_file: ./backend/.env          # LLM / embedding / RAG 設定
+    env_file: ./backend/.env          
+    volumes:
+      - /home/larry/playgroung/harness_agent/tmp/attachments:/data/attachments
     depends_on: [db_api]
     ports:
       - "8000:8000"

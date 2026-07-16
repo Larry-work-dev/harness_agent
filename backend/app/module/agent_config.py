@@ -74,7 +74,7 @@ def local_default() -> str:
     return b or ""
 
 
-def primary_model(task_type: str, local_only: bool = False) -> tuple[str|None, str|None]:
+def primary_model(task_type: str, local_only: bool = False) -> tuple[str, str]:
     """回傳 (primary, fallback) 模型 id。local_only 時只挑 hosting=local。"""
     row = _row(task_type)
     ranked = row.get("candidates_ranked") or []

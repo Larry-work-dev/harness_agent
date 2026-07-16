@@ -71,9 +71,10 @@ def set_summary(conversation_id, summary, summary_until_id):
 def delete_conversation(conversation_id):
     _json(_client.delete(f"/conversations/{conversation_id}"))
 
-def add_message(conversation_id, role, content, sources=None):
+def add_message(conversation_id, role, content, sources=None, attachments=None):
     _json(_client.post("/messages", json={
-        "conversation_id": conversation_id, "role": role, "content": content, "sources": sources}))
+        "conversation_id": conversation_id, "role": role, "content": content,
+        "sources": sources, "attachments": attachments}))
 
 def list_messages(conversation_id) -> list:
     return _json(_client.get("/messages", params={"conversation_id": conversation_id}))
@@ -97,6 +98,19 @@ def search_memories(user_id, embedding, k=5) -> list:
 
 def delete_memory(memory_id, user_id):
     _json(_client.delete(f"/memories/{memory_id}", params={"user_id": user_id}))
+
+
+# ---- 上傳文件切片（app 端 RAG）---------------------------------------
+def add_doc_chunks(user_id, source_name, chunks) -> dict:
+    return _json(_client.post("/doc-chunks", json={
+        "user_id": user_id, "source_name": source_name, "chunks": chunks}))
+
+def search_doc_chunks(user_id, embedding, k=4) -> list:
+    return _json(_client.post("/doc-chunks/search", json={
+        "user_id": user_id, "embedding": embedding, "k": k}))
+
+def list_doc_sources(user_id) -> list:
+    return _json(_client.get("/doc-chunks/sources", params={"user_id": user_id}))
 
 
 # ---- 自訂模型 profile ------------------------------------------------

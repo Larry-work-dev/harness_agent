@@ -15,3 +15,8 @@ python-dotenv==1.2.2
 # 間接相依，釘版本
 langchain-core==1.4.8
 pydantic==2.13.4
+
+# 上傳檔案解析
+python-multipart==0.0.20
+pypdf==5.1.0
+python-docx==1.1.2

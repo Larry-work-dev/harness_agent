@@ -7,11 +7,11 @@ from app.services import messages as svc
 router = APIRouter()
 
 class MessageIn(BaseModel):
-    conversation_id: str; role: str; content: str; sources: list | None = None
+    conversation_id: str; role: str; content: str; sources: list | None = None; attachments: list | None = None
 
 @router.post("/messages")
 def add_message(m: MessageIn, db: Session = Depends(get_db)):
-    svc.add_message(db, m.conversation_id, m.role, m.content, m.sources); return {"ok": True}
+    svc.add_message(db, m.conversation_id, m.role, m.content, m.sources, m.attachments); return {"ok": True}
 
 @router.get("/messages")
 def list_messages(conversation_id: str, db: Session = Depends(get_db)):

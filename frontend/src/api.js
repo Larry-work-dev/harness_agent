@@ -24,6 +24,17 @@ export async function api(path, { method = 'GET', body = null } = {}) {
   return res.status === 204 ? null : res.json()
 }
 
+export async function uploadFiles(files, conversationId) {
+  const fd = new FormData()
+  fd.append('conversation_id', conversationId)
+  for (const f of files) fd.append('files', f)
+  const headers = {}
+  if (token.value) headers.Authorization = 'Bearer ' + token.value
+  const res = await fetch(API + '/uploads', { method: 'POST', headers, body: fd })
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText)
+  return res.json()
+}
+
 const escMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;' }
 export const esc = s => (s ?? '').replace(/[&<>]/g, c => escMap[c])
 

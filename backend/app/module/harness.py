@@ -99,10 +99,33 @@ class Harness:
                 "\n\n關於這位使用者你已知道的事（可作為回答的參考，但不要生硬複述）：\n"
                 + memory_context
             )
+    def run(
+        self,
+        user_message: str,
+        history: list[dict] | None = None,
+        memory_context: str | None = None,
+        extra_system: str | None = None,
+        images: list[dict] | None = None,
+    ) -> Iterator[dict]:
+        system = self.system_prompt()
+        if extra_system:
+            system += "\n\n" + extra_system
+        if memory_context:
+            system += (
+                "\n\n關於這位使用者你已知道的事（可作為回答的參考，但不要生硬複述）：\n"
+                + memory_context
+            )
         messages: list[dict] = [{"role": "system", "content": system}]
         if history:
             messages += history
-        messages.append({"role": "user", "content": user_message})
+        if images:
+            # 視覺訊息：文字 + 圖片區塊（OpenAI 相容格式）
+            content = [{"type": "text", "text": user_message}]
+            for img in images:
+                content.append({"type": "image_url", "image_url": {"url": img["url"]}})
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": user_message})
 
         for chunk in self.graph.stream(
             cast(State, {"messages": messages}),
