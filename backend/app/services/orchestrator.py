@@ -14,7 +14,10 @@ import re
 
 from app.config import create_model
 from app.module import agent_config as cfg
+from app.module.logs import get as get_logger
 from app.module.skills.knowledge_search import _knowledge_search
+
+log = get_logger("orchestrator")
 
 # 分類器用的模型（預設本地 baseline；可用環境變數指定）
 import os
@@ -52,12 +55,16 @@ def classify(text: str) -> dict:
             subs = [s for s in plan.get("subtasks", [])
                     if isinstance(s, dict) and s.get("task_type") in types and s.get("desc")]
             if len(subs) >= 2:
+                log.info("classify → 複合任務 %d 步: %s",
+                         len(subs), [(s["task_type"], s["desc"]) for s in subs])
                 return {"composite": True, "subtasks": subs}
         tt = plan.get("task_type")
         if tt in types:
+            log.info("classify → 單一任務: %s", tt)
             return {"composite": False, "task_type": tt}
-    except Exception:
-        pass
+        log.warning("classify → 解析結果不在類型內(%r)，用預設 %s", plan, default_tt)
+    except Exception as e:  # noqa: BLE001
+        log.warning("classify → 分類器呼叫失敗(%s)，用預設 %s", e, default_tt)
     return {"composite": False, "task_type": default_tt}
 
 
@@ -68,6 +75,8 @@ def run_subtask(sub: dict, prior: str, claude: str) -> tuple[str, str, list]:
     if tt in RETRIEVAL_TASK_TYPES:
         q = desc if not prior else f"{desc}（脈絡：{prior[:400]}）"
         retrieved, sources = retrieve(q)
+        log.info("subtask[%s] 檢索公司知識庫: 命中 %d 筆來源, 內容 %d 字",
+                 tt, len(sources), len(retrieved))
 
     primary, fallback = cfg.primary_model(tt)
     prompt = f"{claude}\n\n[子任務類型] {tt}\n[要完成的事] {desc}\n"
@@ -80,9 +89,11 @@ def run_subtask(sub: dict, prior: str, claude: str) -> tuple[str, str, list]:
         try:
             out = create_model(spec=cfg.model_spec(mid)).invoke(
                 [{"role": "user", "content": prompt}]).content
+            log.info("subtask[%s] 用模型 %s 完成（%d 字）", tt, mid, len(out or ""))
             return mid, out, sources
-        except Exception:
-            continue
+        except Exception as e:  # noqa: BLE001
+            log.warning("subtask[%s] 模型 %s 失敗(%s)，嘗試 fallback", tt, mid, e)
+    log.error("subtask[%s] 主/備模型都失敗", tt)
     return primary, "（此子任務執行失敗）", sources
 
 

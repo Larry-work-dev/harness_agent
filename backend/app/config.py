@@ -59,9 +59,12 @@ def build_chat_model(base_url, model, api_key, temperature=0.0):
 
 def create_model(profile: str | None = None, spec: dict | None = None, temperature: float = 0.0):
     """建立聊天模型：給 spec 就用 spec，否則依 profile（None → LLM_* 預設）。"""
+    from app.module.logs import get as get_logger
     if spec is None:
         spec = profile_spec(profile)
-    print(f"[create_model] profile={profile} → base_url={spec['base_url']!r} model={spec['model']!r}", flush=True)
+    verify = os.environ.get("LLM_VERIFY_SSL", "true").lower() != "false"
+    get_logger("model").info("create_model: model=%s base=%s verify_ssl=%s",
+                             spec["model"], spec["base_url"], verify)
     return build_chat_model(spec["base_url"], spec["model"], spec.get("api_key"), temperature)
 
 
@@ -86,9 +89,12 @@ def list_gateway_models() -> dict:
 def create_embedder():
     """長期記憶用的 embedding 模型（OpenAI 相容 /v1/embeddings）。"""
     from langchain_openai import OpenAIEmbeddings
+    from app.module.logs import get as get_logger
+    m = os.environ.get("EMBED_MODEL", "Qwen3-embedding")
+    base = os.environ.get("EMBED_BASE_URL", os.environ.get("LLM_BASE_URL", DEFAULT_BASE))
+    get_logger("model").debug("create_embedder: model=%s base=%s", m, base)
     return OpenAIEmbeddings(
-        model=os.environ.get("EMBED_MODEL", "Qwen3-embedding"),
-        base_url=os.environ.get("EMBED_BASE_URL", os.environ.get("LLM_BASE_URL", DEFAULT_BASE)),
+        model=m, base_url=base,
         api_key=os.environ.get("LLM_API_KEY"),
         http_client=_openai_http_client(),
         check_embedding_ctx_length=False,

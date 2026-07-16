@@ -18,10 +18,12 @@ from app.module import attachments as att
 from app.module import db_client as db
 from app.module.deps import current_user, require_conversation
 from app.module.harness import Harness
+from app.module.logs import get as get_logger
 from app.module.workflows import get_workflow
 from app.services import memory, orchestrator, routing
 
 router = APIRouter()
+log = get_logger("chat")
 
 
 class ChatRequest(BaseModel):
@@ -81,7 +83,9 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         d = routing.route(req.message, embedder=embedder)
         decision = {**d, "spec": None, "label": d.get("workflow") or "路由中"}
 
-    print(f"[chat] mode={conv.get('mode')!r} imgs={len(images)} docs={len(docs)} → {decision}", flush=True)
+    log.info("decision: user=%s conv_mode=%s imgs=%d docs=%d → mode=%s label=%s (%s)",
+             user["id"], conv.get("mode"), len(images), len(docs),
+             decision["mode"], decision.get("label"), decision.get("reason"))
 
     def sse(o):
         return f"data: {json.dumps(o, ensure_ascii=False)}\n\n"
@@ -112,9 +116,12 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         try:
             hits = db.search_doc_chunks(user["id"], embedder.embed_query(req.message), k=4)
             rag = [f"[{h['source_name']}] {h['content']}" for h in hits]
-        except Exception:
-            pass
+            if hits:
+                log.info("doc-RAG: 檢索到 %d 筆先前上傳文件片段", len(hits))
+        except Exception as e:  # noqa: BLE001
+            log.warning("doc-RAG: 檢索失敗(%s)", e)
         if ep:
+            log.info("doc-ephemeral: 本回合注入 %d 份附件文字", len(ep))
             extra += "\n\n" + "\n\n".join(ep)
         if rag:
             extra += "\n\n【你先前上傳文件的相關片段】\n" + "\n\n".join(rag)
@@ -193,39 +200,45 @@ def chat(req: ChatRequest, user=Depends(current_user)):
             mode = decision["mode"]
 
             if mode == "vision":
+                log.info("→ 走視覺路徑（%d 張圖）模型=%s", len(images), decision["label"])
                 yield from run_vision(ctx)
                 yield sse({"type": "done"}); return
 
             if mode == "auto_route":
                 plan = orchestrator.classify(req.message)
                 if plan["composite"]:
+                    log.info("→ 走複合任務（Orchestrator，%d 步）", len(plan["subtasks"]))
                     yield from run_composite(plan["subtasks"], ctx)
                     yield sse({"type": "done"}); return
                 tt = plan["task_type"]
                 primary, _fb = cfg.primary_model(tt)
-                # 單一檢索型任務（RAG切片）：先查公司知識庫，注入脈絡再生成
                 if tt in orchestrator.RETRIEVAL_TASK_TYPES:
                     content, _srcs = orchestrator.retrieve(req.message)
                     if content:
+                        log.info("→ 單一檢索任務 %s：注入知識庫 %d 字", tt, len(content))
                         ctx += "\n\n[公司知識庫檢索結果，請據此回答並用 [n] 標註來源]\n" + content
                 decision["spec"] = cfg.model_spec(primary)
                 decision["label"] = primary
                 decision["reason"] = f"查路由表：{tt} → {primary}"
                 mode = "generate"
+                log.info("→ 單一任務 %s → 查表模型 %s", tt, primary)
 
             actual = decision["label"] if mode == "generate" else None
             yield sse({"type": "routing", "mode": mode, "model": decision["label"],
                        "actual_model": actual, "reason": decision["reason"]})
 
             if mode == "workflow":
+                log.info("→ 走 workflow: %s", decision["workflow"])
                 wf = get_workflow(decision["workflow"])
                 result = wf.run(req.message) if wf else "找不到對應的流程。"
                 db.add_message(req.conversation_id, "assistant", result)
                 yield sse({"type": "final", "content": result})
                 yield sse({"type": "done"}); return
 
+            log.info("→ 一般生成，模型=%s", decision.get("label"))
             yield from run_single(ctx)
         except Exception as e:  # noqa: BLE001
+            log.exception("event_stream 例外: %s", e)
             yield sse({"type": "error", "message": str(e)})
         yield sse({"type": "done"})
 

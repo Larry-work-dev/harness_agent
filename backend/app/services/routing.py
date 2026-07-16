@@ -13,7 +13,10 @@ import math
 import os
 import re
 
+from app.module.logs import get as get_logger
 from app.module.workflows import load_workflows
+
+log = get_logger("routing")
 
 # 敏感資料規則（可自行擴充）
 _SENSITIVE_PATTERNS = [
@@ -68,15 +71,21 @@ def _ensure_trigger_embeddings(embedder) -> None:
         _trigger_emb[p] = e
 
 
-def match_workflow(text: str, embedder=None) -> str | None:
-    """意圖比對：有 embedder 走語意（比對意圖範例句）、否則關鍵字；embedding 失敗自動退回關鍵字。"""
+def _match(text: str, embedder=None) -> tuple[str | None, str, float | None]:
+    """回 (workflow 名或 None, 比對方法, 最高相似度)。方法：semantic / keyword / keyword-fallback。"""
     if embedder is None:
-        return _match_keyword(text)
+        r = _match_keyword(text)
+        log.info("intent[keyword] (無 embedder) → %s", r)
+        return (r, "keyword", None)
     try:
         _ensure_trigger_embeddings(embedder)
         q = embedder.embed_query(text)
-    except Exception:
-        return _match_keyword(text)   # embedding 服務有問題就降級
+    except Exception as e:  # noqa: BLE001
+        # embedding 服務不可用 → 退回關鍵字（此時「請假」等字會直接命中，易誤觸）
+        r = _match_keyword(text)
+        log.warning("intent[keyword-fallback] embedding 失敗(%s)，退回關鍵字 → %s "
+                    "（這就是『打請假就掉進流程』的原因；請修好 embedding/SSL）", e, r)
+        return (r, "keyword-fallback", None)
 
     best_name, best_sim = None, -1.0
     for wf in load_workflows():
@@ -87,7 +96,15 @@ def match_workflow(text: str, embedder=None) -> str | None:
             sim = _cosine(q, emb)
             if sim > best_sim:
                 best_sim, best_name = sim, wf.name
-    return best_name if best_sim >= WF_MATCH_THRESHOLD else None
+    hit = best_name if best_sim >= WF_MATCH_THRESHOLD else None
+    log.info("intent[semantic] best=%s sim=%.3f thr=%.2f → %s",
+             best_name, best_sim, WF_MATCH_THRESHOLD, hit)
+    return (hit, "semantic", best_sim)
+
+
+def match_workflow(text: str, embedder=None) -> str | None:
+    """意圖比對：有 embedder 走語意（比對意圖範例句）、否則關鍵字；embedding 失敗自動退回關鍵字。"""
+    return _match(text, embedder)[0]
 
 
 def classify_complexity(text: str) -> str:  # 保留相容，已不用於路由
@@ -97,8 +114,15 @@ def classify_complexity(text: str) -> str:  # 保留相容，已不用於路由
 def route(text: str, embedder=None) -> dict:
     """規則+意圖層決策。複雜度分級已移除；開放式任務改由 orchestrator 查路由表。"""
     if detect_sensitive(text):
+        log.info("route → 敏感資料，限本地模型")
         return {"mode": "generate", "profile": "local", "reason": "含敏感資料，限本地模型"}
-    wf = match_workflow(text, embedder)
-    if wf:
-        return {"mode": "workflow", "workflow": wf, "reason": "命中既有意圖"}
+    name, method, score = _match(text, embedder)
+    if name:
+        if method == "semantic":
+            reason = f"命中既有意圖（語意 {score:.2f} ≥ {WF_MATCH_THRESHOLD}）"
+        else:
+            reason = "命中既有意圖（關鍵字比對；語意未啟用，可能誤觸）"
+        log.info("route → workflow:%s（%s）", name, method)
+        return {"mode": "workflow", "workflow": name, "reason": reason}
+    log.info("route → auto_route（開放式，交給分類器/orchestrator）")
     return {"mode": "auto_route", "reason": "開放式任務，查路由表"}
