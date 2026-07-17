@@ -189,6 +189,9 @@ async function send() {
           if (ev.sources) ev.sources.forEach(s => (sources[s.n] = s))
         } else if (ev.type === 'final') {
           items.value.push({ kind: 'agent', html: renderMarkdown(ev.content, sources), text: ev.content, time: new Date().toISOString() })
+        } else if (ev.type === 'critic') {
+          items.value.push({ kind: 'trace', skill: `critic:${ev.task_type}`, args: '',
+            result: (ev.verdict === 'pass' ? '✅ 通過' : '🔁 重試') + '：' + ev.reason })
         } else if (ev.type === 'memory_saved') {
           toast('🧠 已記住：' + ev.items.join('、'))
         } else if (ev.type === 'error') {

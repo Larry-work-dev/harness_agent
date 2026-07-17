@@ -3,8 +3,10 @@
 設定目錄（AGENT_CONFIG_DIR，預設 backend/agent/）結構：
     CLAUDE.md              最高指導原則（每次生成注入 system prompt）
     routing_table.json     任務類型 → 最佳模型（離線評測產出）
-    agents/classifier.md   便宜 LLM 分類器 prompt
-    agents/orchestrator.md 調度器組裝階段 prompt
+    agents/planner.md      Planner：便宜 LLM 分類/拆解 prompt
+    agents/worker.md       Worker：子任務執行者 persona（併入 Harness 的 extra_system）
+    agents/critic.md       Critic：審核 Worker 產出的 prompt
+    agents/orchestrator.md 多 subtask 時的組裝（assemble）階段 prompt
 
 改這些 md/json 即可調整行為，不必動程式。docker 可把此目錄掛成 volume 以便即時編輯。
 """
@@ -27,6 +29,12 @@ DEFAULT_CLASSIFIER = (
     "不明確用「語意分析」。只輸出 JSON。"
 )
 DEFAULT_ORCH = "整合各子任務結果成一份連貫的繁體中文回覆，只輸出最終回覆。"
+DEFAULT_WORKER = "你是子任務執行者，只需完成交給你的這一個子任務，直接給出結果。"
+DEFAULT_CRITIC = (
+    '你是審核者。判斷輸出是否完成子任務、且（若有提供檢索來源）是否有根據來源而非憑空捏造。'
+    '只輸出 JSON：通過 {"pass": true, "reason": "..."}；'
+    '不通過 {"pass": false, "reason": "...", "feedback": "給 Worker 的具體修正指示"}。'
+)
 
 
 def _read(rel: str, default: str) -> str:
@@ -139,9 +147,17 @@ def claude_md() -> str:
     return _read("CLAUDE.md", DEFAULT_CLAUDE)
 
 
-def classifier_prompt() -> str:
-    return _read("agents/classifier.md", DEFAULT_CLASSIFIER)
+def planner_prompt() -> str:
+    return _read("agents/planner.md", DEFAULT_CLASSIFIER)
 
 
 def orchestrator_prompt() -> str:
     return _read("agents/orchestrator.md", DEFAULT_ORCH)
+
+
+def worker_prompt() -> str:
+    return _read("agents/worker.md", DEFAULT_WORKER)
+
+
+def critic_prompt() -> str:
+    return _read("agents/critic.md", DEFAULT_CRITIC)

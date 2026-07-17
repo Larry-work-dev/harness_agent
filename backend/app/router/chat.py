@@ -143,6 +143,8 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         return extra
 
     def run_single(ctx):
+        """給『手動指定模型』與『敏感資料強制本地模型』用：decision 已經定死 spec/profile，
+        不經過 Planner/Worker/Critic（敏感資料絕不能被送進分類器或依路由表挑到雲端模型）。"""
         summary, recent = memory.build_context(req.conversation_id)
         recent = recent[:-1] if recent else recent
         memory_text = memory.recall(embedder, user["id"], req.message)
@@ -165,25 +167,96 @@ def chat(req: ChatRequest, user=Depends(current_user)):
             if learned:
                 yield sse({"type": "memory_saved", "items": learned})
 
-    def run_composite(subtasks, ctx):
-        yield sse({"type": "routing", "mode": "composite",
-                   "model": f"複合任務 {len(subtasks)} 步", "actual_model": None,
-                   "reason": "Orchestrator 拆解並分派 sub-agents"})
-        results = []; prior = ""
-        for sub in subtasks:
-            primary, _fb = cfg.primary_model(sub["task_type"])
-            yield sse({"type": "skill_call", "skill": sub["task_type"],
-                       "args": {"desc": sub["desc"], "model": primary}})
-            mid, out, srcs = orchestrator.run_subtask(sub, prior, ctx)
-            ev = {"type": "skill_result", "skill": sub["task_type"], "result": out}
-            if srcs:
-                ev["sources"] = srcs
-            yield sse(ev)
-            results.append({"task_type": sub["task_type"], "output": out})
-            prior += f"\n[{sub['task_type']}] {out}"
-        final = orchestrator.assemble(req.message, results, ctx)
-        db.add_message(req.conversation_id, "assistant", final)
+    def run_plan(subtasks, ctx):
+        """Planner 已把需求拆成 >=1 個 subtask；逐一用 Harness（Worker）執行 + Critic 審核，
+        單一 subtask 時直接用其輸出，多個 subtask 時用 assemble() 組裝成一份回覆。"""
+        yield sse({"type": "routing",
+                   "mode": "composite" if len(subtasks) > 1 else "single",
+                   "model": f"複合任務 {len(subtasks)} 步" if len(subtasks) > 1 else subtasks[0]["task_type"],
+                   "actual_model": None,
+                   "reason": (f"Planner 拆解 {len(subtasks)} 步"
+                              if len(subtasks) > 1 else f"單一任務：{subtasks[0]['task_type']}")})
+
+        # 記憶只在整個 turn 處理一次（不分單一/複合）
+        summary, recent = memory.build_context(req.conversation_id)
+        recent = recent[:-1] if recent else recent
+        memory_text = memory.recall(embedder, user["id"], req.message)
+        hist = ([{"role": "system", "content": "以下是先前對話的摘要：\n" + summary}] if summary else []) + recent
+
+        critic_on = os.environ.get("CRITIC_ENABLED", "true").lower() == "true"
+        max_retries = int(os.environ.get("CRITIC_MAX_RETRIES", "1"))
+
+        results = []; prior = ""; all_sources: dict = {}
+
+        for i, sub in enumerate(subtasks):
+            is_first = (i == 0)
+            primary, fallback = cfg.primary_model(sub["task_type"])
+            harness = Harness(create_model(spec=cfg.model_spec(primary), temperature=0.0))
+
+            # 檢索 safety net：只在沒有 tool-calling 能力時才做，且只做一次、不隨 retry 重做
+            retrieved, retrieved_sources = "", []
+            if not harness.use_tools and sub["task_type"] in orchestrator.RETRIEVAL_TASK_TYPES:
+                q = sub["desc"] if not prior else f"{sub['desc']}（脈絡：{prior[:400]}）"
+                retrieved, retrieved_sources = orchestrator.retrieve(q)
+                log.info("subtask[%s] 檢索公司知識庫: 命中 %d 筆來源", sub["task_type"], len(retrieved_sources))
+
+            retry_feedback, attempt, tried_fallback = None, 0, False
+            while True:
+                extra_system = orchestrator.build_worker_prompt(sub, prior, ctx, retrieved, retry_feedback)
+                events_yielded, final_text, attempt_sources = 0, None, []
+                try:
+                    for ev in harness.run(sub["desc"], history=hist if is_first else None,
+                                          memory_context=memory_text if is_first else None,
+                                          extra_system=extra_system):
+                        events_yielded += 1
+                        if ev["type"] == "final":
+                            final_text = ev["content"]; continue  # 吞掉，不當整輪 SSE final 轉發
+                        if ev["type"] == "skill_result" and ev.get("sources"):
+                            attempt_sources.extend(ev["sources"])
+                        ev = {**ev, "subtask_index": i, "attempt": attempt}
+                        yield sse(ev)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("subtask[%s] Harness 執行例外(%s)", sub["task_type"], e)
+                    if events_yielded == 0 and not tried_fallback and fallback != primary:
+                        # 還沒吐出任何事件：整個換 fallback 模型重來一次（只試一次，不算 critic attempt）
+                        tried_fallback = True
+                        try:
+                            harness = Harness(create_model(spec=cfg.model_spec(fallback), temperature=0.0))
+                            continue
+                        except Exception:
+                            pass
+                    yield sse({"type": "error", "subtask_index": i,
+                               "message": f"子任務「{sub['task_type']}」執行失敗：{e}"})
+                    final_text = None
+
+                if final_text is None:
+                    final_text = "（此子任務執行失敗）"
+                    break
+
+                if not critic_on:
+                    break
+                verdict = orchestrator.review(sub, final_text, retrieved_sources + attempt_sources, req.message)
+                yield sse({"type": "critic", "task_type": sub["task_type"], "subtask_index": i,
+                           "verdict": "pass" if verdict["pass"] else "retry", "reason": verdict["reason"]})
+                if verdict["pass"] or attempt >= max_retries:
+                    break
+                retry_feedback, attempt = verdict["feedback"], attempt + 1
+
+            results.append({"task_type": sub["task_type"], "output": final_text})
+            prior += f"\n[{sub['task_type']}] {final_text}"
+            for s in retrieved_sources + attempt_sources:
+                all_sources.setdefault((s.get("name"), s.get("url")), s)
+
+        final = orchestrator.assemble(req.message, results, ctx) if len(subtasks) > 1 else results[0]["output"]
+
+        db.add_message(req.conversation_id, "assistant", final, list(all_sources.values()) or None)
         yield sse({"type": "final", "content": final})
+
+        mem_model = create_model(spec=cfg.model_spec(cfg.local_default()))
+        memory.maybe_summarize(mem_model, req.conversation_id)
+        learned = memory.extract_and_store(mem_model, embedder, user["id"], req.message, final)
+        if learned:
+            yield sse({"type": "memory_saved", "items": learned})
 
     def run_vision(ctx):
         mid = decision["label"]
@@ -238,27 +311,14 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 yield sse({"type": "done"}); return
 
             if mode == "auto_route":
-                plan = orchestrator.classify(req.message)
-                if plan["composite"]:
-                    log.info("→ 走複合任務（Orchestrator，%d 步）", len(plan["subtasks"]))
-                    yield from run_composite(plan["subtasks"], ctx)
-                    yield sse({"type": "done"}); return
-                tt = plan["task_type"]
-                primary, _fb = cfg.primary_model(tt)
-                if tt in orchestrator.RETRIEVAL_TASK_TYPES:
-                    content, _srcs = orchestrator.retrieve(req.message)
-                    if content:
-                        log.info("→ 單一檢索任務 %s：注入知識庫 %d 字", tt, len(content))
-                        ctx += "\n\n[公司知識庫檢索結果，請據此回答並用 [n] 標註來源]\n" + content
-                decision["spec"] = cfg.model_spec(primary)
-                decision["label"] = primary
-                decision["reason"] = f"查路由表：{tt} → {primary}"
-                mode = "generate"
-                log.info("→ 單一任務 %s → 查表模型 %s", tt, primary)
+                subtasks = orchestrator.plan(req.message)
+                log.info("→ 走 Planner→Worker→Critic（%d 步）", len(subtasks))
+                yield from run_plan(subtasks, ctx)
+                yield sse({"type": "done"}); return
 
-            actual = decision["label"] if mode == "generate" else None
             yield sse({"type": "routing", "mode": mode, "model": decision["label"],
-                       "actual_model": actual, "reason": decision["reason"]})
+                       "actual_model": decision["label"] if mode == "generate" else None,
+                       "reason": decision["reason"]})
 
             if mode == "workflow":
                 log.info("→ 走 workflow: %s", decision["workflow"])
@@ -268,7 +328,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 yield sse({"type": "final", "content": result})
                 yield sse({"type": "done"}); return
 
-            log.info("→ 一般生成，模型=%s", decision.get("label"))
+            log.info("→ 一般生成（手動/敏感強制模型），模型=%s", decision.get("label"))
             yield from run_single(ctx)
         except Exception as e:  # noqa: BLE001
             log.exception("event_stream 例外: %s", e)

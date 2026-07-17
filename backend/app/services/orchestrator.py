@@ -1,9 +1,12 @@
-"""Orchestrator —— 開放式任務的分類與（複合任務的）拆解執行。
+"""Orchestrator —— 開放式任務的 Planner / Worker prompt 組裝 / Critic 三代理支援層。
 
-流程（對應 mermaid 的「開放式」分支）：
-  1. classify()：便宜 LLM 一次判斷 單一/複合 + task_type / subtasks。
-  2. 單一任務：由 chat 直接查路由表取最佳模型生成。
-  3. 複合任務：run_subtask() 逐一執行（後者可看前者結果），assemble() 組裝。
+流程：
+  1. plan()：Planner（便宜 LLM）判斷 單一/複合，一律回傳 >=1 筆 subtasks。
+  2. chat.py 的 run_plan() 逐一用 Harness 執行每個 subtask（Worker），
+     本模組只負責組 Worker 的 extra_system prompt（build_worker_prompt），
+     不碰 Harness/SSE，那是 chat.py 的職責。
+  3. review()：Critic 審核 Worker 產出，不通過時 chat.py 會帶著 feedback 重跑一次。
+  4. assemble()：多個 subtask 時，組裝成一份連貫回覆。
 
 模型皆依 routing_table 的 task_type → 最佳模型；主模型失敗改用 fallback。
 """
@@ -19,9 +22,10 @@ from app.module.skills.knowledge_search import _knowledge_search
 
 log = get_logger("orchestrator")
 
-# 分類器用的模型（預設本地 baseline；可用環境變數指定）
+# 分類器/審核用的模型（預設本地 baseline；可用環境變數指定）
 import os
 _CLASSIFIER_MODEL = os.environ.get("AGENT_CLASSIFIER_MODEL") or cfg.local_default()
+_CRITIC_MODEL = os.environ.get("AGENT_CRITIC_MODEL") or cfg.local_default()
 
 # 這些任務類型需要「查公司知識庫」——sub-agent 會先呼叫 RAG 再交給模型（不需 gateway tool-calling）
 RETRIEVAL_TASK_TYPES = {t.strip() for t in
@@ -45,7 +49,7 @@ def classify(text: str) -> dict:
     """便宜 LLM 分類：回 {composite, task_type} 或 {composite, subtasks}。失敗→單一語意分析。"""
     types = cfg.valid_task_types()
     default_tt = "語意分析" if "語意分析" in types else types[0]
-    sys = cfg.classifier_prompt().replace("{{TASK_TYPES}}", "、".join(types))
+    sys = cfg.planner_prompt().replace("{{TASK_TYPES}}", "、".join(types))
     try:
         model = create_model(spec=cfg.model_spec(_CLASSIFIER_MODEL or cfg.local_default()))
         out = model.invoke([{"role": "system", "content": sys},
@@ -89,33 +93,55 @@ def classify_image_task(text: str) -> str:
     return "圖面理解" if "圖面理解" in img_types else img_types[0]
 
 
-def run_subtask(sub: dict, prior: str, claude: str) -> tuple[str, str, list]:
-    """執行單一子任務。檢索型（RAG切片）先查公司知識庫再交模型；回 (模型, 產出, 來源)。"""
-    tt, desc = sub["task_type"], sub["desc"]
-    retrieved, sources = "", []
-    if tt in RETRIEVAL_TASK_TYPES:
-        q = desc if not prior else f"{desc}（脈絡：{prior[:400]}）"
-        retrieved, sources = retrieve(q)
-        log.info("subtask[%s] 檢索公司知識庫: 命中 %d 筆來源, 內容 %d 字",
-                 tt, len(sources), len(retrieved))
+def plan(text: str) -> list[dict]:
+    """Planner：一律回傳 >=1 個 {'task_type':..., 'desc':...}。
 
-    primary, fallback = cfg.primary_model(tt)
-    prompt = f"{claude}\n\n[子任務類型] {tt}\n[要完成的事] {desc}\n"
+    單一任務包成 1 筆清單，下游（chat.py 的 run_plan）不用再分兩條路；
+    複合任務則原樣回傳 classify() 拆解出的 subtasks。
+    """
+    result = classify(text)
+    if result["composite"]:
+        return result["subtasks"]
+    return [{"task_type": result["task_type"], "desc": text}]
+
+
+def build_worker_prompt(sub: dict, prior: str, ctx: str, retrieved: str = "",
+                         retry_feedback: str | None = None) -> str:
+    """組 Worker 的 extra_system 字串（不做任何檢索呼叫，retrieval 由呼叫端做一次並傳入，
+    避免 Critic 要求 retry 時重新檢索、對出不一致的來源）。"""
+    tt, desc = sub["task_type"], sub["desc"]
+    parts = [ctx, cfg.worker_prompt(), f"[子任務類型] {tt}\n[要完成的事] {desc}"]
     if retrieved:
-        prompt += (f"\n[公司知識庫檢索結果，請只根據這些內容，並用 [n] 標註來源]\n{retrieved}\n")
+        parts.append(f"[公司知識庫檢索結果，請只根據這些內容，並用 [n] 標註來源]\n{retrieved}")
     if prior:
-        prompt += f"\n[前面步驟的結果，供你參考]\n{prior}\n"
-    prompt += "\n請只完成這個子任務，直接給出結果。"
-    for mid in (primary, fallback):
-        try:
-            out = create_model(spec=cfg.model_spec(mid)).invoke(
-                [{"role": "user", "content": prompt}]).content
-            log.info("subtask[%s] 用模型 %s 完成（%d 字）", tt, mid, len(out or ""))
-            return mid, out, sources
-        except Exception as e:  # noqa: BLE001
-            log.warning("subtask[%s] 模型 %s 失敗(%s)，嘗試 fallback", tt, mid, e)
-    log.error("subtask[%s] 主/備模型都失敗", tt)
-    return primary, "（此子任務執行失敗）", sources
+        parts.append(f"[前面步驟的結果，供你參考]\n{prior}")
+    if retry_feedback:
+        parts.append(f"[上一輪的審核意見，請針對此修正]\n{retry_feedback}")
+    return "\n\n".join(parts)
+
+
+def review(sub: dict, output: str, sources: list, full_request: str) -> dict:
+    """Critic：審核 Worker 產出。回 {'pass': bool, 'reason': str, 'feedback': str}。
+
+    Fail-open：任何例外（timeout/JSON 解析失敗/模型錯誤）一律回 pass=True，
+    絕不讓 Critic 壞掉卡住整輪對話。
+    """
+    tt, desc = sub["task_type"], sub["desc"]
+    src_text = "\n".join(f"[{s.get('n')}] {s.get('name')}" for s in sources) if sources else "（無檢索來源）"
+    prompt = (f"{cfg.critic_prompt()}\n\n"
+              f"使用者原始需求：{full_request}\n"
+              f"子任務類型：{tt}\n要完成的事：{desc}\n"
+              f"可用來源：\n{src_text}\n\nWorker 的回覆：\n{output}")
+    try:
+        out = create_model(spec=cfg.model_spec(_CRITIC_MODEL)).invoke(
+            [{"role": "user", "content": prompt}]).content
+        verdict = _parse_json(out)
+        passed = bool(verdict.get("pass", True))
+        log.info("review[%s] → pass=%s (%s)", tt, passed, verdict.get("reason"))
+        return {"pass": passed, "reason": verdict.get("reason", ""), "feedback": verdict.get("feedback", "")}
+    except Exception as e:  # noqa: BLE001
+        log.warning("review[%s] Critic 呼叫失敗(%s)，fail-open 放行", tt, e)
+        return {"pass": True, "reason": f"Critic 呼叫失敗，放行（{e}）", "feedback": ""}
 
 
 def assemble(original: str, results: list[dict], claude: str) -> str:
