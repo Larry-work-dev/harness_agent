@@ -19,6 +19,7 @@ from app.module import db_client as db
 from app.module.deps import current_user, require_conversation
 from app.module.harness import Harness
 from app.module.logs import get as get_logger
+from app.module import ocr
 from app.module.workflows import get_workflow
 from app.services import memory, orchestrator, routing
 
@@ -117,7 +118,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         ep, total = [], 0
         for a in docs:
             try:
-                t = att.extract_text(a["path"])
+                t, _ocr = ocr.extract_text_smart(a["path"])
             except Exception:
                 t = ""
             if not t:
@@ -129,7 +130,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 break
         rag = []
         try:
-            hits = db.search_doc_chunks(user["id"], embedder.embed_query(req.message), k=4)
+            hits = db.search_doc_chunks(req.conversation_id, embedder.embed_query(req.message), k=4)
             rag = [f"[{h['source_name']}] {h['content']}" for h in hits]
             if hits:
                 log.info("doc-RAG: 檢索到 %d 筆先前上傳文件片段", len(hits))
@@ -235,7 +236,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
 
                 if not critic_on:
                     break
-                verdict = orchestrator.review(sub, final_text, retrieved_sources + attempt_sources, req.message)
+                verdict = orchestrator.review(sub, final_text, extra_system, attempt_sources, req.message)
                 yield sse({"type": "critic", "task_type": sub["task_type"], "subtask_index": i,
                            "verdict": "pass" if verdict["pass"] else "retry", "reason": verdict["reason"]})
                 if verdict["pass"] or attempt >= max_retries:

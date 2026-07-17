@@ -35,6 +35,20 @@ export async function uploadFiles(files, conversationId) {
   return res.json()
 }
 
+// 下載對話裡先前上傳過的附件（a.path 形如 "{conversation_id}/{uuid}__{filename}"）
+export async function downloadAttachment(a) {
+  const headers = {}
+  if (token.value) headers.Authorization = 'Bearer ' + token.value
+  const res = await fetch(API + '/attachments/' + a.path, { headers })
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText)
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url; link.download = a.name
+  document.body.appendChild(link); link.click(); link.remove()
+  URL.revokeObjectURL(url)
+}
+
 const escMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;' }
 export const esc = s => (s ?? '').replace(/[&<>]/g, c => escMap[c])
 

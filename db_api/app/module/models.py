@@ -85,10 +85,13 @@ class ModelProfile(Base):
 
 
 class DocChunk(Base):
-    """上傳文件切片（app 端 RAG，pgvector 檢索）。"""
+    """上傳文件切片（app 端 RAG，pgvector 檢索）。綁 conversation_id：
+    刪對話時 cascade 一起刪，且檢索只會查到「這個對話」上傳過的文件，不會跟別的對話混。"""
     __tablename__ = "doc_chunks"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
     source_name: Mapped[str] = mapped_column(String, nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     content: Mapped[str] = mapped_column(Text, nullable=False)

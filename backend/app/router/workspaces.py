@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.module import attachments as att
 from app.module import db_client as db
 from app.module.deps import current_user, require_member
+from app.module.logs import get as get_logger
 
 router = APIRouter()
+log = get_logger("workspaces")
 
 
 class WorkspaceIn(BaseModel):
@@ -47,9 +50,19 @@ def new_conversation(wid: int, body: ConversationIn, user=Depends(current_user))
 def delete_workspace(wid: int, user=Depends(current_user)):
     # 1. 驗證使用者是否有該 workspace 的權限
     require_member(wid, user)
-    
-    # 2. 呼叫資料庫操作刪除 workspace (請確保 db_client 中有實作此方法)
+
+    # 2. 刪前先記下底下所有對話 id：DB 那邊 conversations/messages/doc_chunks 都是
+    #    FK ondelete=CASCADE 會自動清掉，但磁盤上的附件檔案不歸 DB 管，要自己清
+    cids = [c["id"] for c in db.list_conversations(wid)]
+
+    # 3. 呼叫資料庫操作刪除 workspace
     db.delete_workspace(wid)
-    
-    # 3. 回傳成功訊息
+
+    for cid in cids:
+        try:
+            att.delete_conversation_files(cid)
+        except Exception as e:  # noqa: BLE001
+            log.warning("刪 workspace %s 時清對話 %s 附件檔案失敗(%s)", wid, cid, e)
+
+    # 4. 回傳成功訊息
     return {"ok": True}

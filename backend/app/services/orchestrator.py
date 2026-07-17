@@ -120,18 +120,28 @@ def build_worker_prompt(sub: dict, prior: str, ctx: str, retrieved: str = "",
     return "\n\n".join(parts)
 
 
-def review(sub: dict, output: str, sources: list, full_request: str) -> dict:
+def review(sub: dict, output: str, extra_system: str, tool_sources: list, full_request: str) -> dict:
     """Critic：審核 Worker 產出。回 {'pass': bool, 'reason': str, 'feedback': str}。
+
+    extra_system 是 Worker 當時實際看到的完整上下文（build_worker_prompt() 組出來的，
+    已經包含 ctx 裡的附件/先前上傳文件片段、以及 RETRIEVAL_TASK_TYPES 的安全網檢索內容）——
+    一定要把這個給 Critic 看，否則 Critic 只看得到窄窄一份 tool_sources 清單，
+    會把「根據 ctx 裡文件內容回答」誤判成憑空捏造來源（曾實際發生：使用者上傳文件問問題，
+    Worker 依附件內容回答並標註來源，Critic 卻因為看不到那份附件內容而判定捏造）。
+    tool_sources 是額外透過工具（knowledge_search 等）查到、帶編號的來源，用來核對 [n] 標註是否對得上。
 
     Fail-open：任何例外（timeout/JSON 解析失敗/模型錯誤）一律回 pass=True，
     絕不讓 Critic 壞掉卡住整輪對話。
     """
     tt, desc = sub["task_type"], sub["desc"]
-    src_text = "\n".join(f"[{s.get('n')}] {s.get('name')}" for s in sources) if sources else "（無檢索來源）"
+    src_text = ("\n".join(f"[{s.get('n')}] {s.get('name')}" for s in tool_sources)
+                if tool_sources else "（這次沒有另外透過工具查詢帶編號的來源）")
     prompt = (f"{cfg.critic_prompt()}\n\n"
               f"使用者原始需求：{full_request}\n"
               f"子任務類型：{tt}\n要完成的事：{desc}\n"
-              f"可用來源：\n{src_text}\n\nWorker 的回覆：\n{output}")
+              f"Worker 執行時已經拿到的上下文（可能包含系統指示、附件/先前上傳文件片段、"
+              f"公司知識庫檢索結果等，這些內容都算合法依據，不算憑空捏造）：\n{extra_system}\n\n"
+              f"另外透過工具查詢、帶編號的來源：\n{src_text}\n\nWorker 的回覆：\n{output}")
     try:
         out = create_model(spec=cfg.model_spec(_CRITIC_MODEL)).invoke(
             [{"role": "user", "content": prompt}]).content

@@ -1,6 +1,6 @@
 <script setup>
 import { ref, nextTick, onMounted } from 'vue'
-import { API, token, setToken, api, esc, renderCitations, renderMarkdown, sourceListHTML, uploadFiles } from '../api.js'
+import { API, token, setToken, api, esc, renderCitations, renderMarkdown, sourceListHTML, uploadFiles, downloadAttachment } from '../api.js'
 import MemoryPanel from './MemoryPanel.vue'
 
 const workspaces = ref([])
@@ -122,7 +122,7 @@ async function selectConversation(cid) {
   convModelSel.value = cv?.model || 'auto'
   const msgs = await api(`/conversations/${cid}/messages`)
   for (const m of msgs) {
-    if (m.role === 'user') items.value.push({ kind: 'user', text: m.content, time: m.created_at })
+    if (m.role === 'user') items.value.push({ kind: 'user', text: m.content, attachments: m.attachments || [], time: m.created_at })
     else {
       const sources = {}; (m.sources || []).forEach(s => (sources[s.n] = s))
       items.value.push({ kind: 'agent', html: renderMarkdown(m.content, sources), text: m.content, time: m.created_at })
@@ -206,6 +206,10 @@ async function send() {
   } finally {
     sending.value = false
   }
+}
+
+async function download(a) {
+  try { await downloadAttachment(a) } catch (e) { toast('下載失敗：' + e.message) }
 }
 
 function onEnter(e) { if (!e.shiftKey) { e.preventDefault(); send() } }
@@ -310,7 +314,9 @@ async function copy(text, i) {
               <div class="col">
                 <div class="bubble" v-if="it.text">{{ it.text }}</div>
                 <div v-if="it.attachments && it.attachments.length" class="msg-atts">
-                  <span v-for="(a, ai) in it.attachments" :key="ai" class="msg-att">{{ a.kind === 'image' ? '🖼' : '📄' }} {{ a.name }}</span>
+                  <button v-for="(a, ai) in it.attachments" :key="ai" class="msg-att" title="下載" @click="download(a)">
+                    {{ a.kind === 'image' ? '🖼' : '📄' }} {{ a.name }}
+                  </button>
                 </div>
                 <div class="time">{{ formatTime(it.time) }}</div>
               </div>
@@ -471,7 +477,8 @@ main { display: flex; flex-direction: column; overflow: hidden; }
 .attach { background: none; border: none; color: var(--muted); font-size: 18px; padding: 0 4px; align-self: flex-end; }
 .attach:hover { color: var(--agent); }
 .msg-atts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.msg-att { background: var(--surface-2); border: 1px solid var(--border); border-radius: 7px; padding: 3px 8px; font-size: 12px; color: var(--muted); }
+.msg-att { background: var(--surface-2); border: 1px solid var(--border); border-radius: 7px; padding: 3px 8px; font-size: 12px; color: var(--muted); font-family: inherit; cursor: pointer; }
+.msg-att:hover { color: var(--agent); border-color: var(--agent); }
 .box { max-width: 806px; display: flex; gap: 10px; align-items: flex-end; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 8px 8px 8px 16px; margin: 0 auto; }
 .box:focus-within { border-color: var(--agent); }
 textarea { flex: 1; background: none; border: none; color: var(--text); font-family: inherit; font-size: 15px; resize: none; max-height: 160px; line-height: 1.5; padding: 6px 0; }

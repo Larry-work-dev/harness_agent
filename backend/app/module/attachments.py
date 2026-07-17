@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import os
 import re
+import shutil
 import uuid
 from pathlib import Path
 
@@ -56,6 +57,11 @@ def read_bytes(rel: str) -> bytes:
     return _safe(rel).read_bytes()
 
 
+def delete_conversation_files(conversation_id: str) -> None:
+    """刪對話時一併清掉磁盤上的附件（doc_chunks/messages 交給 DB FK cascade，這裡只管檔案）。"""
+    shutil.rmtree(_safe(conversation_id), ignore_errors=True)
+
+
 def image_data_url(rel: str, mime: str = "") -> str:
     data = read_bytes(rel)
     mime = mime or image_mime(rel)
@@ -79,6 +85,15 @@ def extract_text(rel: str) -> str:
         reader = PdfReader(io.BytesIO(raw))
         return "\n".join((page.extract_text() or "") for page in reader.pages)
     return ""
+
+
+def pdf_page_images(rel: str, dpi: int = 150) -> list[str]:
+    """把 PDF 每一頁渲染成 PNG data URL 清單，給掃描版 PDF 的 OCR 備援用。"""
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(stream=read_bytes(rel), filetype="pdf")
+    return ["data:image/png;base64," + base64.b64encode(page.get_pixmap(dpi=dpi).tobytes("png")).decode()
+            for page in doc]
 
 
 def chunk_text(text: str, size: int = 800, overlap: int = 120) -> list[str]:

@@ -100,17 +100,18 @@ def delete_memory(memory_id, user_id):
     _json(_client.delete(f"/memories/{memory_id}", params={"user_id": user_id}))
 
 
-# ---- 上傳文件切片（app 端 RAG）---------------------------------------
-def add_doc_chunks(user_id, source_name, chunks) -> dict:
+# ---- 上傳文件切片（app 端 RAG，綁 conversation_id：檢索範圍限定這個對話）------
+def add_doc_chunks(user_id, conversation_id, source_name, chunks) -> dict:
     return _json(_client.post("/doc-chunks", json={
-        "user_id": user_id, "source_name": source_name, "chunks": chunks}))
+        "user_id": user_id, "conversation_id": conversation_id,
+        "source_name": source_name, "chunks": chunks}))
 
-def search_doc_chunks(user_id, embedding, k=4) -> list:
+def search_doc_chunks(conversation_id, embedding, k=4) -> list:
     return _json(_client.post("/doc-chunks/search", json={
-        "user_id": user_id, "embedding": embedding, "k": k}))
+        "conversation_id": conversation_id, "embedding": embedding, "k": k}))
 
-def list_doc_sources(user_id) -> list:
-    return _json(_client.get("/doc-chunks/sources", params={"user_id": user_id}))
+def list_doc_sources(conversation_id) -> list:
+    return _json(_client.get("/doc-chunks/sources", params={"conversation_id": conversation_id}))
 
 
 # ---- 自訂模型 profile ------------------------------------------------
