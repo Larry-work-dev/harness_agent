@@ -22,10 +22,12 @@ from app.module.skills.knowledge_search import _knowledge_search
 
 log = get_logger("orchestrator")
 
-# 分類器/審核用的模型（預設本地 baseline；可用環境變數指定）
+# 分類器/審核/查詢改寫用的模型（預設本地 baseline；可用環境變數指定）
 import os
 _CLASSIFIER_MODEL = os.environ.get("AGENT_CLASSIFIER_MODEL") or cfg.local_default()
 _CRITIC_MODEL = os.environ.get("AGENT_CRITIC_MODEL") or cfg.local_default()
+_QUERY_REWRITE_MODEL = os.environ.get("AGENT_QUERY_REWRITE_MODEL") or _CLASSIFIER_MODEL
+QUERY_REWRITE_ENABLED = os.environ.get("QUERY_REWRITE_ENABLED", "true").lower() == "true"
 
 # 這些任務類型需要「查公司知識庫」——sub-agent 會先呼叫 RAG 再交給模型（不需 gateway tool-calling）
 RETRIEVAL_TASK_TYPES = {t.strip() for t in
@@ -35,6 +37,26 @@ RETRIEVAL_TASK_TYPES = {t.strip() for t in
 def retrieve(query: str) -> tuple[str, list]:
     """呼叫公司知識庫（RAG），回 (檢索內容, 來源清單)。失敗時回錯誤訊息與空來源。"""
     return _knowledge_search(query)
+
+
+def rewrite_query(query: str, history_text: str = "") -> str:
+    """RAG 檢索前把使用者原句（可能指代不明，如「那個」「這樣的話」）依對話上下文
+    改寫成一句獨立、明確、適合語意檢索的查詢。Fail-open：關掉/失敗/改寫成空白都直接用原句，
+    絕不能讓查詢改寫壞掉卡住檢索。"""
+    if not QUERY_REWRITE_ENABLED or not query.strip():
+        return query
+    sys = cfg.query_rewrite_prompt()
+    user = f"最近對話：\n{history_text}\n\n使用者原句：{query}" if history_text else f"使用者原句：{query}"
+    try:
+        out = create_model(spec=cfg.model_spec(_QUERY_REWRITE_MODEL)).invoke(
+            [{"role": "system", "content": sys}, {"role": "user", "content": user}]).content
+        rewritten = (out or "").strip()
+        if rewritten:
+            log.info("rewrite_query: %r → %r", query, rewritten)
+            return rewritten
+    except Exception as e:  # noqa: BLE001
+        log.warning("rewrite_query 失敗(%s)，用原句", e)
+    return query
 
 
 def _parse_json(text: str) -> dict:

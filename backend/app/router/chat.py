@@ -130,10 +130,15 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 break
         rag = []
         try:
-            hits = db.search_doc_chunks(req.conversation_id, embedder.embed_query(req.message), k=4)
+            _summary, recent_msgs = memory.build_context(req.conversation_id)
+            recent_msgs = recent_msgs[:-1] if recent_msgs else recent_msgs  # 排除剛存進去的本輪訊息
+            hist_text = "\n".join(f"{m['role']}：{m['content']}" for m in recent_msgs[-4:])
+            rag_query = orchestrator.rewrite_query(req.message, hist_text)
+            hits = db.search_doc_chunks(req.conversation_id, embedder.embed_query(rag_query), k=4)
             rag = [f"[{h['source_name']}] {h['content']}" for h in hits]
             if hits:
-                log.info("doc-RAG: 檢索到 %d 筆先前上傳文件片段", len(hits))
+                log.info("doc-RAG: 檢索到 %d 筆先前上傳文件片段（查詢：%r → %r）",
+                         len(hits), req.message, rag_query)
         except Exception as e:  # noqa: BLE001
             log.warning("doc-RAG: 檢索失敗(%s)", e)
         if ep:
@@ -197,9 +202,13 @@ def chat(req: ChatRequest, user=Depends(current_user)):
             # 檢索 safety net：只在沒有 tool-calling 能力時才做，且只做一次、不隨 retry 重做
             retrieved, retrieved_sources = "", []
             if not harness.use_tools and sub["task_type"] in orchestrator.RETRIEVAL_TASK_TYPES:
-                q = sub["desc"] if not prior else f"{sub['desc']}（脈絡：{prior[:400]}）"
+                base_q = sub["desc"] if not prior else f"{sub['desc']}（脈絡：{prior[:400]}）"
+                hist_text = ("\n".join(f"{m['role']}：{m['content']}" for m in recent[-4:])
+                             if is_first and recent else "")
+                q = orchestrator.rewrite_query(base_q, hist_text)
                 retrieved, retrieved_sources = orchestrator.retrieve(q)
-                log.info("subtask[%s] 檢索公司知識庫: 命中 %d 筆來源", sub["task_type"], len(retrieved_sources))
+                log.info("subtask[%s] 檢索公司知識庫: 查詢 %r → %r，命中 %d 筆來源",
+                         sub["task_type"], base_q, q, len(retrieved_sources))
 
             retry_feedback, attempt, tried_fallback = None, 0, False
             while True:

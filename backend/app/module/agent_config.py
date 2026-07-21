@@ -7,6 +7,7 @@
     agents/worker.md       Worker：子任務執行者 persona（併入 Harness 的 extra_system）
     agents/critic.md       Critic：審核 Worker 產出的 prompt
     agents/orchestrator.md 多 subtask 時的組裝（assemble）階段 prompt
+    agents/query_rewrite.md 查詢改寫器：RAG 檢索前把指代不明的原句改寫成獨立查詢
 
 改這些 md/json 即可調整行為，不必動程式。docker 可把此目錄掛成 volume 以便即時編輯。
 """
@@ -34,6 +35,10 @@ DEFAULT_CRITIC = (
     '你是審核者。判斷輸出是否完成子任務、且（若有提供檢索來源）是否有根據來源而非憑空捏造。'
     '只輸出 JSON：通過 {"pass": true, "reason": "..."}；'
     '不通過 {"pass": false, "reason": "...", "feedback": "給 Worker 的具體修正指示"}。'
+)
+DEFAULT_QUERY_REWRITE = (
+    "根據最近對話（若有）跟使用者原句，改寫成一句獨立、明確、適合語意檢索的查詢；"
+    "已經明確獨立就原樣輸出。只輸出改寫後的查詢本身。"
 )
 
 
@@ -161,3 +166,7 @@ def worker_prompt() -> str:
 
 def critic_prompt() -> str:
     return _read("agents/critic.md", DEFAULT_CRITIC)
+
+
+def query_rewrite_prompt() -> str:
+    return _read("agents/query_rewrite.md", DEFAULT_QUERY_REWRITE)
