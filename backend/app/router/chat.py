@@ -191,6 +191,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
 
         critic_on = os.environ.get("CRITIC_ENABLED", "true").lower() == "true"
         max_retries = int(os.environ.get("CRITIC_MAX_RETRIES", "1"))
+        max_fallback_retries = int(os.environ.get("WORKER_FALLBACK_MAX_RETRIES", "1"))
 
         results = []; prior = ""; all_sources: dict = {}
 
@@ -210,7 +211,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 log.info("subtask[%s] 檢索公司知識庫: 查詢 %r → %r，命中 %d 筆來源",
                          sub["task_type"], base_q, q, len(retrieved_sources))
 
-            retry_feedback, attempt, tried_fallback = None, 0, False
+            retry_feedback, attempt, fallback_attempts = None, 0, 0
             while True:
                 extra_system = orchestrator.build_worker_prompt(sub, prior, ctx, retrieved, retry_feedback)
                 events_yielded, final_text, attempt_sources = 0, None, []
@@ -227,9 +228,9 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                         yield sse(ev)
                 except Exception as e:  # noqa: BLE001
                     log.warning("subtask[%s] Harness 執行例外(%s)", sub["task_type"], e)
-                    if events_yielded == 0 and not tried_fallback and fallback != primary:
-                        # 還沒吐出任何事件：整個換 fallback 模型重來一次（只試一次，不算 critic attempt）
-                        tried_fallback = True
+                    if events_yielded == 0 and fallback_attempts < max_fallback_retries and fallback != primary:
+                        # 還沒吐出任何事件：換 fallback 模型重來（次數由 WORKER_FALLBACK_MAX_RETRIES 控制，不算 critic attempt）
+                        fallback_attempts += 1
                         try:
                             harness = Harness(create_model(spec=cfg.model_spec(fallback), temperature=0.0))
                             continue

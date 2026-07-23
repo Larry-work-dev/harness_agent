@@ -6,6 +6,7 @@
 """
 import json
 import os
+import re
 
 import httpx
 
@@ -15,6 +16,27 @@ RAG_BASE_URL = os.environ.get("RAG_BASE_URL", "http://172.16.174.116:8001")
 RAG_TOPK = int(os.environ.get("RAG_TOPK", "5"))
 RAG_TIMEOUT = float(os.environ.get("RAG_TIMEOUT", "30"))
 RAG_VERIFY_SSL = os.environ.get("RAG_VERIFY_SSL", "true").lower() != "false"
+
+# ── 擴大搜尋範圍 ──
+# 料號查詢常常對應到數十甚至數百筆資料，預設 topk 撈不完；
+# 命中「料號格式」或下列關鍵字時，改用較大的 RAG_TOPK_EXPANDED。
+RAG_TOPK_EXPANDED = int(os.environ.get("RAG_TOPK_EXPANDED", "50"))
+# 保險：若第一次查詢剛好撈滿 topk 筆（代表可能還有更多、被截斷），
+# 且目前用的 topk 還沒到這個上限，就自動用 RAG_TOPK_MAX 再查一次。
+RAG_TOPK_MAX = int(os.environ.get("RAG_TOPK_MAX", "100"))
+RAG_EXPAND_KEYWORDS = {kw.strip() for kw in
+                       os.environ.get("RAG_EXPAND_KEYWORDS", "CAR,LL,MRB,報廢").split(",") if kw.strip()}
+# 料號格式：英數混合、6 碼以上，可能帶 -數字 後綴（例如 DFPK0456B2GY0P3-1）
+_PART_NUMBER_RE = re.compile(
+    r"\b(?=[A-Za-z0-9-]{6,}\b)(?=[A-Za-z0-9-]*[A-Za-z])(?=[A-Za-z0-9-]*[0-9])[A-Za-z0-9]+(?:-[A-Za-z0-9]+)?\b"
+)
+
+
+def _needs_expanded_search(query: str) -> bool:
+    if _PART_NUMBER_RE.search(query):
+        return True
+    return any(kw.lower() in query.lower() for kw in RAG_EXPAND_KEYWORDS)
+
 
 # 權限過濾。RAG 服務的 filter 欄位為必填；預設不加限制（空陣列）。
 # 若要套權限，設環境變數 RAG_FILTER 為 JSON 陣列，例如：
@@ -30,24 +52,20 @@ def _load_filter() -> list:
         return []
 
 
-def _knowledge_search(query: str):
-    """在公司知識庫中檢索與問題相關的文件片段。回傳 (給模型的文字, 來源清單)。"""
-    payload = {"search": query, "filter": _load_filter(), "topk": RAG_TOPK}
-    try:
-        resp = httpx.post(
-            f"{RAG_BASE_URL}/api/v1/query",
-            json=payload,
-            timeout=RAG_TIMEOUT,
-            verify=RAG_VERIFY_SSL,
-        )
-        resp.raise_for_status()
-        nodes = resp.json()
-    except Exception as e:  # noqa: BLE001
-        return (f"知識庫檢索失敗：{e}", [])
+def _query_rag(query: str, topk: int):
+    """呼叫 RAG 服務一次，回傳原始 nodes 清單（失敗時丟例外）。"""
+    payload = {"search": query, "filter": _load_filter(), "topk": topk}
+    resp = httpx.post(
+        f"{RAG_BASE_URL}/api/v1/query",
+        json=payload,
+        timeout=RAG_TIMEOUT,
+        verify=RAG_VERIFY_SSL,
+    )
+    resp.raise_for_status()
+    return resp.json()
 
-    if not nodes:
-        return ("知識庫中查無相關資料。", [])
 
+def _format(nodes: list):
     parts = []
     sources = []
     for i, node in enumerate(nodes, 1):
@@ -63,6 +81,27 @@ def _knowledge_search(query: str):
         "並在每個句子後面用 [n] 標註它依據的來源編號：\n\n" + "\n\n".join(parts)
     )
     return (content, sources)
+
+
+def _knowledge_search(query: str):
+    """在公司知識庫中檢索與問題相關的文件片段。回傳 (給模型的文字, 來源清單)。
+
+    命中料號格式或 CAR/LL/MRB/報廢 等關鍵字時，直接用擴大過的 topk 查詢；
+    若查詢結果剛好撈滿 topk（代表可能還有更多筆被截斷），且尚未到 RAG_TOPK_MAX，
+    會自動再用 RAG_TOPK_MAX 查一次以擴大搜尋範圍。
+    """
+    topk = RAG_TOPK_EXPANDED if _needs_expanded_search(query) else RAG_TOPK
+    try:
+        nodes = _query_rag(query, topk)
+        if len(nodes) >= topk and topk < RAG_TOPK_MAX:
+            nodes = _query_rag(query, RAG_TOPK_MAX)
+    except Exception as e:  # noqa: BLE001
+        return (f"知識庫檢索失敗：{e}", [])
+
+    if not nodes:
+        return ("知識庫中查無相關資料。", [])
+
+    return _format(nodes)
 
 
 SKILL = Skill(
