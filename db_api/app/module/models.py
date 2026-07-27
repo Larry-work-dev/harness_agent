@@ -15,6 +15,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     salt: Mapped[str] = mapped_column(String, nullable=False)
+    emp_id: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -82,6 +83,20 @@ class ModelProfile(Base):
     model: Mapped[str] = mapped_column(String, nullable=False)
     api_key: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserPermission(Base):
+    """員工在公司 RAG 知識庫的檢索權限（依 emp_id，不綁單一 workspace/使用者帳號）。
+
+    filter_criteria 直接存 RAG 服務 /api/v1/query 要的 filter 陣列（每個 docType 一條規則），
+    knowledge_search 依目前使用者的 emp_id 查出來後原樣當 filter 送出，取代寫死的 RAG_FILTER。"""
+    __tablename__ = "user_permissions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    emp_id: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
+    filter_criteria: Mapped[list] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class DocChunk(Base):

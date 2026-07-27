@@ -10,7 +10,11 @@ import re
 
 import httpx
 
+from app.module import db_client as db
+from app.module.logs import get as get_logger
 from .base import Skill
+
+log = get_logger("knowledge_search")
 
 RAG_BASE_URL = os.environ.get("RAG_BASE_URL", "http://172.16.174.116:8001")
 RAG_TOPK = int(os.environ.get("RAG_TOPK", "5"))
@@ -38,11 +42,20 @@ def _needs_expanded_search(query: str) -> bool:
     return any(kw.lower() in query.lower() for kw in RAG_EXPAND_KEYWORDS)
 
 
-# 權限過濾。RAG 服務的 filter 欄位為必填；預設不加限制（空陣列）。
-# 若要套權限，設環境變數 RAG_FILTER 為 JSON 陣列，例如：
-#   RAG_FILTER='[{"allowDirect":"Y","compCode":"AVC","depCode":"IT",
-#                 "docType":"","empID":"","metadataIds":""}]'
-def _load_filter() -> list:
+# 權限過濾。RAG 服務的 filter 欄位為必填。
+# 優先順序：呼叫端傳進來的 emp_id（依 emp_id 查 DB 裡存的 filter_criteria，見
+# db_api 的 user_permissions 表、db_client.get_permission_by_emp_id）
+# → 沒有 emp_id 或查詢失敗 → 退回環境變數 RAG_FILTER（沒設就是空陣列，不加限制）。
+# Fail-open：DB 查詢失敗絕不能讓檢索整個掛掉，退回環境變數繼續查。
+#
+# emp_id 用「明確參數」一路從 chat.py 傳進來（Harness → 綁定過 emp_id 的
+# knowledge_search 工具 → 這裡），不是用 contextvar：SSE 用 StreamingResponse
+# 時，Starlette 對這種 sync generator 每次 next() 都是丟進 threadpool、
+# 每次都重新複製一份 context 執行，contextvar 在某次 yield 設的值，下一次
+# yield 之後的程式碼不保證還看得到（實測會整個沒作用，甚至在 generator 結束
+# reset() 時噴 "Token was created in a different Context"）。明確傳參數才會
+# 對，跟目前是哪個 thread/context 在跑無關。
+def _env_filter() -> list:
     raw = os.environ.get("RAG_FILTER")
     if not raw:
         return []
@@ -52,9 +65,23 @@ def _load_filter() -> list:
         return []
 
 
-def _query_rag(query: str, topk: int):
+def _resolve_filter(emp_id: str | None) -> list:
+    if not emp_id:
+        return _env_filter()
+    try:
+        perm = db.get_permission_by_emp_id(emp_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("查詢使用者權限失敗(emp_id=%s): %s，退回環境變數 RAG_FILTER", emp_id, e)
+        return _env_filter()
+    if perm and perm.get("filter_criteria"):
+        return perm["filter_criteria"]
+    log.info("emp_id=%s 沒有 DB 權限紀錄，退回環境變數 RAG_FILTER", emp_id)
+    return _env_filter()
+
+
+def _query_rag(query: str, topk: int, emp_id: str | None):
     """呼叫 RAG 服務一次，回傳原始 nodes 清單（失敗時丟例外）。"""
-    payload = {"search": query, "filter": _load_filter(), "topk": topk}
+    payload = {"search": query, "filter": _resolve_filter(emp_id), "topk": topk}
     resp = httpx.post(
         f"{RAG_BASE_URL}/api/v1/query",
         json=payload,
@@ -66,25 +93,40 @@ def _query_rag(query: str, topk: int):
 
 
 def _format(nodes: list):
+    """把節點轉成給模型看的文字＋來源清單。
+
+    引用用 RAG 服務 metadata 裡的 FileID（該檔案的唯一 UUID/hex ID）標註，
+    不是自己編號的 [1][2][3]——避免筆數一多（甚至上百筆）時，模型引用的序號
+    跟實際來源對不上；FileID 直接對應回真正的檔案，來源絕對正確。
+    """
     parts = []
     sources = []
     for i, node in enumerate(nodes, 1):
         text = (node.get("text") or "").strip()
         meta = node.get("metadata") or {}
-        name = meta.get("FileName") or meta.get("file_name") or f"來源 {i}"
+        file_id = meta.get("FileID") or meta.get("file_id") or f"src-{i}"
+        name = meta.get("FileName") or meta.get("file_name") or file_id
         url = meta.get("ReferenceURL") or meta.get("reference_url") or ""
-        parts.append(f"[{i}] 來源：{name}\n{text}")
-        sources.append({"n": i, "name": name, "url": url})
+        if url.strip().upper() in ("", "N/A"):  # RAG 服務沒有連結時填 "N/A"，不是有效網址
+            url = ""
+        parts.append(f"[{file_id}] 來源：{name}\n{text}")
+        sources.append({"n": file_id, "name": name, "url": url})
 
     content = (
         "以下是從公司知識庫檢索到的資料。回答時請只根據這些內容，"
-        "並在每個句子後面用 [n] 標註它依據的來源編號：\n\n" + "\n\n".join(parts)
+        "並在每個句子後面、句號之前，原樣照抄該段落開頭方括號內的 FileID"
+        "（例如 [5d73300befa4450ea08808ece5a49d38]）標註它依據的來源；"
+        "不要自己編號、不要省略字元、不要修改 FileID 內容：\n\n" + "\n\n".join(parts)
     )
     return (content, sources)
 
 
-def _knowledge_search(query: str):
+def _knowledge_search(query: str, emp_id: str | None = None):
     """在公司知識庫中檢索與問題相關的文件片段。回傳 (給模型的文字, 來源清單)。
+
+    emp_id 只給後端呼叫端用（見上面 _resolve_filter 的說明），Harness 綁定
+    工具時會把這個參數藏起來，不會出現在 LLM 看到的 tool schema 裡——模型
+    不能自己指定要用誰的權限查。
 
     命中料號格式或 CAR/LL/MRB/報廢 等關鍵字時，直接用擴大過的 topk 查詢；
     若查詢結果剛好撈滿 topk（代表可能還有更多筆被截斷），且尚未到 RAG_TOPK_MAX，
@@ -92,9 +134,9 @@ def _knowledge_search(query: str):
     """
     topk = RAG_TOPK_EXPANDED if _needs_expanded_search(query) else RAG_TOPK
     try:
-        nodes = _query_rag(query, topk)
+        nodes = _query_rag(query, topk, emp_id)
         if len(nodes) >= topk and topk < RAG_TOPK_MAX:
-            nodes = _query_rag(query, RAG_TOPK_MAX)
+            nodes = _query_rag(query, RAG_TOPK_MAX, emp_id)
     except Exception as e:  # noqa: BLE001
         return (f"知識庫檢索失敗：{e}", [])
 

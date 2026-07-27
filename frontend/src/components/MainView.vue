@@ -460,10 +460,10 @@ main { display: flex; flex-direction: column; overflow: hidden; }
 .bubble th, .bubble td { border: 1px solid var(--border); padding: 5px 10px; }
 .bubble hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 
-.trace { font-family: var(--font-mono); font-size: 12.5px; background: color-mix(in srgb, var(--skill) 7%, var(--surface)); border: 1px solid color-mix(in srgb, var(--skill) 28%, var(--border)); border-left: 2.5px solid var(--skill); border-radius: 8px; padding: 9px 13px; max-width: 780px; align-self: flex-start; margin-left: 43px; }
+.trace { font-family: var(--font-mono); font-size: 12.5px; background: color-mix(in srgb, var(--skill) 7%, var(--surface)); border: 1px solid color-mix(in srgb, var(--skill) 28%, var(--border)); border-left: 2.5px solid var(--skill); border-radius: 8px; padding: 9px 13px; max-width: 780px; align-self: flex-start; margin-left: 43px; overflow-wrap: anywhere; word-break: break-word; }
 .trace .call { color: var(--skill); }
-.trace .args { color: var(--muted); }
-.trace .result { color: var(--text); margin-top: 5px; padding-top: 5px; border-top: 1px dashed var(--border); }
+.trace .args { color: var(--muted); overflow-wrap: anywhere; word-break: break-word; }
+.trace .result { color: var(--text); margin-top: 5px; padding-top: 5px; border-top: 1px dashed var(--border); overflow-wrap: anywhere; word-break: break-word; }
 .trace .result::before { content: "→ "; color: var(--success); }
 
 .composer { border-top: 1px solid var(--border); padding: 16px 26px 20px; }

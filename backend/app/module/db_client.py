@@ -17,18 +17,38 @@ def _json(resp: httpx.Response):
 
 
 # ---- 使用者 / session ------------------------------------------------
-def create_user(username, password_hash, salt) -> int:
+def create_user(username, password_hash, salt, emp_id=None) -> int:
     return _json(_client.post("/users", json={
-        "username": username, "password_hash": password_hash, "salt": salt}))["id"]
+        "username": username, "password_hash": password_hash, "salt": salt,
+        "emp_id": emp_id}))["id"]
 
 def get_user_by_name(username):
     return _json(_client.get("/users/by-name", params={"username": username}))
+
+def get_user_by_emp_id(emp_id):
+    return _json(_client.get("/users/by-emp-id", params={"emp_id": emp_id}))
+
+def set_user_emp_id(user_id, emp_id):
+    return _json(_client.patch(f"/users/{user_id}/emp-id", json={"emp_id": emp_id}))
+
+def update_password(user_id, password_hash, salt):
+    return _json(_client.patch(f"/users/{user_id}/password", json={
+        "password_hash": password_hash, "salt": salt}))
 
 def create_session(token, user_id):
     _json(_client.post("/sessions", json={"token": token, "user_id": user_id}))
 
 def get_user_by_token(token):
     return _json(_client.get("/users/by-token", params={"token": token}))
+
+
+# ---- RAG 檢索權限（依 emp_id）----------------------------------------
+def upsert_permission(emp_id, filter_criteria) -> dict:
+    return _json(_client.post("/permissions", json={
+        "emp_id": emp_id, "filter_criteria": filter_criteria}))
+
+def get_permission_by_emp_id(emp_id):
+    return _json(_client.get("/permissions/by-emp-id", params={"emp_id": emp_id}))
 
 
 # ---- workspace -------------------------------------------------------

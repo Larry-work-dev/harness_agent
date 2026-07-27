@@ -34,9 +34,33 @@ RETRIEVAL_TASK_TYPES = {t.strip() for t in
                         os.environ.get("RETRIEVAL_TASK_TYPES", "RAG切片").split(",") if t.strip()}
 
 
-def retrieve(query: str) -> tuple[str, list]:
-    """呼叫公司知識庫（RAG），回 (檢索內容, 來源清單)。失敗時回錯誤訊息與空來源。"""
-    return _knowledge_search(query)
+def retrieve(query: str, emp_id: str | None = None) -> tuple[str, list]:
+    """呼叫公司知識庫（RAG），回 (檢索內容, 來源清單)。失敗時回錯誤訊息與空來源。
+
+    emp_id 明確由呼叫端（chat.py，依登入者身分）傳入，不是 contextvar——
+    這裡是 harness.use_tools=False 時的安全網路徑，跟 harness.py 綁 tool
+    用的閉包參數是同一套明確傳參數的做法，理由見 harness._bind_emp_id 的說明。
+    """
+    return _knowledge_search(query, emp_id=emp_id)
+
+
+# 引用標記是 RAG 服務 metadata 的 FileID（32 碼 hex 或含 dash 的 UUID），
+# 不是自己編號的序號——見 knowledge_search._format()。
+# 方括號內外加 \s* 是因為實測模型偶爾會多打空白（例如 "[ b04d50a0...]"），
+# 沒有這個容錯，來源會整批被判定「沒有引用」而濾光。
+_CITATION_RE = re.compile(r"\[\s*([0-9a-fA-F-]{8,40})\s*\]")
+
+
+def cited_sources(text: str, sources: list[dict]) -> list[dict]:
+    """只留下回覆文字裡『實際引用過』的來源（依文字中出現的 [FileID] 篩選）。
+
+    retrieved_sources/attempt_sources 是整批檢索結果（可能上百筆），模型不見得
+    每筆都引用到；附給使用者的「參考資料」應該只列答案真的用到的那幾筆，
+    而且要用 FileID 對，不是位置序號——序號在筆數一多、或跨多個子任務/多次
+    檢索時很容易對錯來源，FileID 直接對應回真正的檔案就不會有這個問題。
+    """
+    used = {n for n in _CITATION_RE.findall(text or "")}
+    return [s for s in sources if s.get("n") in used]
 
 
 def rewrite_query(query: str, history_text: str = "") -> str:
@@ -134,7 +158,7 @@ def build_worker_prompt(sub: dict, prior: str, ctx: str, retrieved: str = "",
     tt, desc = sub["task_type"], sub["desc"]
     parts = [ctx, cfg.worker_prompt(), f"[子任務類型] {tt}\n[要完成的事] {desc}"]
     if retrieved:
-        parts.append(f"[公司知識庫檢索結果，請只根據這些內容，並用 [n] 標註來源]\n{retrieved}")
+        parts.append(f"[公司知識庫檢索結果，請只根據這些內容，並用其 FileID 標註來源]\n{retrieved}")
     if prior:
         parts.append(f"[前面步驟的結果，供你參考]\n{prior}")
     if retry_feedback:
@@ -150,7 +174,7 @@ def review(sub: dict, output: str, extra_system: str, tool_sources: list, full_r
     一定要把這個給 Critic 看，否則 Critic 只看得到窄窄一份 tool_sources 清單，
     會把「根據 ctx 裡文件內容回答」誤判成憑空捏造來源（曾實際發生：使用者上傳文件問問題，
     Worker 依附件內容回答並標註來源，Critic 卻因為看不到那份附件內容而判定捏造）。
-    tool_sources 是額外透過工具（knowledge_search 等）查到、帶編號的來源，用來核對 [n] 標註是否對得上。
+    tool_sources 是額外透過工具（knowledge_search 等）查到、帶 FileID 的來源，用來核對 [FileID] 標註是否對得上。
 
     Fail-open：任何例外（timeout/JSON 解析失敗/模型錯誤）一律回 pass=True，
     絕不讓 Critic 壞掉卡住整輪對話。

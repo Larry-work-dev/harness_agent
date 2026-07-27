@@ -36,9 +36,34 @@ class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
+def _bind_emp_id(skill, emp_id: str | None):
+    """knowledge_search 要依『目前登入者』的 emp_id 查 DB 權限（見
+    knowledge_search._resolve_filter）；用明確的閉包參數綁定，不是
+    contextvar——contextvar 在 SSE 這種 StreamingResponse 的 sync generator
+    裡，Starlette 每次 next() 都丟進 threadpool、每次都重新複製一份
+    context，某次 yield 設的值下一次不保證還在，曾實測整個沒作用、甚至
+    generator 收尾 reset() 時噴例外。閉包綁定的值就是函式物件本身帶著走，
+    跟目前是哪個 thread/context 在跑無關，一定對。
+
+    這裡刻意寫一個「只剩 query 參數」的包裝函式（不是 functools.partial——
+    langchain 的 StructuredTool.from_function 對 partial 物件呼叫
+    typing.get_type_hints() 會直接噴錯），確保 emp_id 不會出現在 LLM 看到的
+    tool schema 裡，模型沒辦法自己指定要用誰的權限查。
+    """
+    if skill.name != "knowledge_search":
+        return skill
+    from dataclasses import replace
+    original = skill.run
+
+    def _run(query: str):
+        return original(query, emp_id=emp_id)
+
+    return replace(skill, run=_run)
+
+
 class Harness:
-    def __init__(self, model: Any, max_steps: int = 8):
-        self.skills = load_skills()
+    def __init__(self, model: Any, max_steps: int = 8, emp_id: str | None = None):
+        self.skills = [_bind_emp_id(s, emp_id) for s in load_skills()]
         self.tools = [s.as_tool() for s in self.skills]
         self.max_steps = max_steps
         self.use_tools = tools_enabled()
@@ -58,8 +83,10 @@ class Harness:
             f"{catalog}\n"
             "需要時直接呼叫對應 skill，取得結果後再用中文回答使用者。\n"
             "當你根據 knowledge_search 檢索到的資料回答時，"
-            "請在每一個句子的結尾、句號之前，用 [n] 標註該句依據的來源編號"
-            "（n 對應檢索結果中每段前面的編號）；沒有依據的句子則不標註。"
+            "請在每一個句子的結尾、句號之前，原樣照抄該段落開頭方括號內的 FileID"
+            "（檢索結果每段最前面的 [FileID]，直接照抄、不要自己編號、不要省略字元、"
+            "方括號內外都不要加空格）"
+            "標註該句依據的來源；沒有依據的句子則不標註。"
         )
 
     def _build(self):

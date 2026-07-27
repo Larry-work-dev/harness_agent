@@ -32,7 +32,7 @@ def register(username: str, password: str) -> str:
 
 
 def login(username: str, password: str) -> str:
-    user = db.get_user_by_name(username)
+    user = db.get_user_by_name(username) or db.get_user_by_emp_id(username)
     if not user or not verify_password(password, user["salt"], user["password_hash"]):
         raise ValueError("帳號或密碼錯誤")
     return _issue_token(user["id"])
@@ -46,3 +46,12 @@ def _issue_token(user_id: int) -> str:
 
 def user_from_token(token: str):
     return db.get_user_by_token(token)
+
+
+def change_password(user: dict, old_password: str, new_password: str) -> None:
+    if not verify_password(old_password, user["salt"], user["password_hash"]):
+        raise ValueError("原密碼錯誤")
+    if len(new_password) < 6:
+        raise ValueError("密碼至少 6 個字元")
+    pw_hash, salt = hash_password(new_password)
+    db.update_password(user["id"], pw_hash, salt)

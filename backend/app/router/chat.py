@@ -156,7 +156,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         memory_text = memory.recall(embedder, user["id"], req.message)
         hist = ([{"role": "system", "content": "以下是先前對話的摘要：\n" + summary}] if summary else []) + recent
         model = create_model(profile=decision.get("profile"), spec=decision.get("spec"), temperature=0.0)
-        harness = Harness(model)
+        harness = Harness(model, emp_id=user.get("emp_id"))
         final_content = None; collected = {}
         for ev in harness.run(req.message, history=hist, memory_context=memory_text, extra_system=ctx):
             if ev["type"] == "skill_result" and ev.get("sources"):
@@ -166,7 +166,8 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 final_content = ev["content"]
             yield sse(ev)
         if final_content is not None:
-            sources = [collected[n] for n in sorted(collected)]
+            all_collected = [collected[n] for n in sorted(collected)]
+            sources = orchestrator.cited_sources(final_content, all_collected)
             db.add_message(req.conversation_id, "assistant", final_content, sources or None)
             memory.maybe_summarize(model, req.conversation_id)
             learned = memory.extract_and_store(model, embedder, user["id"], req.message, final_content)
@@ -198,7 +199,8 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         for i, sub in enumerate(subtasks):
             is_first = (i == 0)
             primary, fallback = cfg.primary_model(sub["task_type"])
-            harness = Harness(create_model(spec=cfg.model_spec(primary), temperature=0.0))
+            harness = Harness(create_model(spec=cfg.model_spec(primary), temperature=0.0),
+                               emp_id=user.get("emp_id"))
 
             # 檢索 safety net：只在沒有 tool-calling 能力時才做，且只做一次、不隨 retry 重做
             retrieved, retrieved_sources = "", []
@@ -207,7 +209,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 hist_text = ("\n".join(f"{m['role']}：{m['content']}" for m in recent[-4:])
                              if is_first and recent else "")
                 q = orchestrator.rewrite_query(base_q, hist_text)
-                retrieved, retrieved_sources = orchestrator.retrieve(q)
+                retrieved, retrieved_sources = orchestrator.retrieve(q, emp_id=user.get("emp_id"))
                 log.info("subtask[%s] 檢索公司知識庫: 查詢 %r → %r，命中 %d 筆來源",
                          sub["task_type"], base_q, q, len(retrieved_sources))
 
@@ -232,7 +234,8 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                         # 還沒吐出任何事件：換 fallback 模型重來（次數由 WORKER_FALLBACK_MAX_RETRIES 控制，不算 critic attempt）
                         fallback_attempts += 1
                         try:
-                            harness = Harness(create_model(spec=cfg.model_spec(fallback), temperature=0.0))
+                            harness = Harness(create_model(spec=cfg.model_spec(fallback), temperature=0.0),
+                                               emp_id=user.get("emp_id"))
                             continue
                         except Exception:
                             pass
@@ -260,7 +263,8 @@ def chat(req: ChatRequest, user=Depends(current_user)):
 
         final = orchestrator.assemble(req.message, results, ctx) if len(subtasks) > 1 else results[0]["output"]
 
-        db.add_message(req.conversation_id, "assistant", final, list(all_sources.values()) or None)
+        sources = orchestrator.cited_sources(final, list(all_sources.values()))
+        db.add_message(req.conversation_id, "assistant", final, sources or None)
         yield sse({"type": "final", "content": final})
 
         mem_model = create_model(spec=cfg.model_spec(cfg.local_default()))
