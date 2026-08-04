@@ -26,8 +26,8 @@ services:
     volumes:
       - /home/larry/playgroung/harness_agent/tmp/attachments:/data/attachments
     depends_on: [db_api, mcp_server]
-    ports:
-      - "8000:8000"
+    # ports:
+    #   - "8000:8000"
     networks: [harness-net]
 
   frontend:
@@ -35,7 +35,7 @@ services:
     build: ./frontend                 # Vite 建置 → nginx serve dist
     depends_on: [backend]
     ports:
-      - "8880:80"                      # 瀏覽器開 http://localhost:8880
+      - "80:80"                      # 瀏覽器開 http://localhost:8880
     networks: [harness-net]
 
 networks:
