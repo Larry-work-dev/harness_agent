@@ -1,18 +1,19 @@
 # Agent Harness
 
-前後分離、多使用者、有長短期記憶的對話式 agent。服務拆成四塊：
+前後分離、多使用者、有長短期記憶的對話式 agent。服務拆成五塊：
 
 ```
 frontend (Vite+Vue) ── 對話式深色 UI（登入 + workspace + 對話列表 + 記憶面板）
       │  同源反代
 backend           ── 主邏輯：認證流程、harness、兩層記憶編排
-      │  HTTP
-db_api            ── 唯一連 DB 的服務，只做 CRUD / 向量查詢
-      │
-db (pgvector) + pgadmin   ── 獨立一包，可單獨啟停 / 備份
+      │  HTTP                              │  MCP（Streamable HTTP）
+db_api            ── 唯一連 DB 的服務   mcp_server ── tool-calling（calculator/
+      │                                              text_stats/get_weather/
+db (pgvector) + pgadmin   ── 獨立一包           knowledge_search）
 ```
 
 - **db_api** 是唯一碰 Postgres 的服務；backend 完全不裝 DB driver。
+- **mcp_server** 是獨立的 MCP tool server（Streamable HTTP）：backend 當 MCP client 連過去取得 tool、呼叫執行，tool 本身不在 backend process 裡跑。knowledge_search 需要「依登入者身分」查 RAG 權限（db_api 的 user_permissions 表），backend 用 `X-Emp-Id` 這個 HTTP header 帶 emp_id 過去——header 不在 tool 的 JSON schema 裡，LLM 看不到、也改不動要用誰的權限查。
 - **記憶兩層**：短期＝單一對話的滾動摘要 + 最近幾輪；長期＝綁 user 的事實，用 pgvector 語意召回。
 - **workspace** 為租戶邊界，可多人共用；長期記憶綁 user。
 
@@ -22,9 +23,10 @@ db (pgvector) + pgadmin   ── 獨立一包，可單獨啟停 / 備份
 ```bash
 docker compose -f db/docker-compose.yml up -d
 ```
-填好 backend 設定後起應用這包：
+填好 backend / mcp_server 設定後起應用這包：
 ```bash
 cp backend/.env.example backend/.env    # 填入 LLM_MODEL / LLM_API_KEY 等
+cp mcp_server/.env.example mcp_server/.env    # 填入 RAG_BASE_URL 等
 docker compose up -d --build
 ```
 - 前端： http://localhost:8080
@@ -44,6 +46,7 @@ docker compose -f db/docker-compose.yml down -v     # 連資料一起清
 | frontend | 8080 | nginx，serve 前端 + 反代 API |
 | backend | 8000 | 主邏輯 API |
 | db_api | (內部) | CRUD，僅在 harness-net 內 |
+| mcp_server | (內部) | MCP tool server，僅 backend 會連 |
 | db | 5432 | Postgres + pgvector |
 | pgadmin | 5050 | DB 管理介面 |
 
@@ -52,9 +55,13 @@ docker compose -f db/docker-compose.yml down -v     # 連資料一起清
 - 每輪對話：短期記憶提供「摘要 + 最近幾輪」當上下文；長期記憶用當前問題做向量召回，注入最相關的幾條。
 - 回覆後：把超出視窗的舊訊息折疊進滾動摘要；並萃取新的長期事實（embedding 後存入，去重）。
 
-## 新增 skill
+## 新增 tool
 
-在 `backend/skills/` 放一個 `.py`、匯出 `SKILL` 物件即可，harness 會自動載入。
+tool-calling 在獨立的 `mcp_server/` 服務裡（不在 backend process 內）。在
+`mcp_server/app/tools/` 放一個 `.py`、寫一個 `register(server)` 函式用
+`@server.tool()` 註冊，並在 `mcp_server/app/server.py` 呼叫它即可；backend
+那邊的 `app/module/mcp_client.py` 會自動跟 mcp_server 要最新的 tool 清單，
+不用改 backend 的程式碼。
 
 ## 前端（Vite + Vue）
 
@@ -81,8 +88,8 @@ docker compose -f db/docker-compose.yml down -v     # 連資料一起清
       app/
         config.py               # 模型設定（profile/embedder/gateway）
         module/db_client.py      # HTTP client → db_api
+        module/mcp_client.py     # MCP client → mcp_server（取代原本的 module/skills/）
         module/harness.py        # agent harness
-        module/skills/           # Tool 層
         module/workflows/        # 既定流程層
         module/deps.py           # 登入/權限相依
         services/auth.py         # 認證
@@ -90,6 +97,13 @@ docker compose -f db/docker-compose.yml down -v     # 連資料一起清
         services/routing.py      # 路由決策（敏感/意圖/複雜度）
         router/*.py              # APIRouter（auth/workspaces/conversations/memories/skills/models/chat）
         main.py                  # 掛 router
+
+    mcp_server/                 # 獨立 MCP tool server（Streamable HTTP）
+      app/
+        tools/                   # calculator / text_stats / weather / knowledge_search
+        module/db_client.py      # HTTP client → db_api（knowledge_search 查 emp_id 權限用）
+        server.py                # MCPServer 實例 + tool 註冊 + 進入點
+      .env.example               # RAG_BASE_URL 等（從 backend 搬過來的設定）
 
 啟動：`db_api` 的 Docker 進入點會先 `alembic upgrade head` 再開服務；
 connection string 走各自 `.env` 的 `DATABASE_URL`（compose 已用 `postgresql+psycopg://`）。

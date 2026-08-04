@@ -18,8 +18,7 @@ class FakeModel:
         return AIMessage(content=f"台北{results[0]}，(12+8)*3 = {results[1]}。")
 
 h = Harness(FakeModel())
-print("自動載入的 skills：", [s.name for s in h.skills])
-print("harness 綁定的 tools：", [t.name for t in h.tools])
+print("從 mcp_server 取得並綁定的 tools：", [t.name for t in h.tools])
 print("\n--- 執行事件串流 ---")
 for ev in h.run("台北天氣如何？順便算 (12+8)*3"):
     print(ev)

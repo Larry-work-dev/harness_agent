@@ -1,18 +1,24 @@
-"""Skill：呼叫公司 RAG 服務，檢索知識庫中相關的文件片段。
+"""Tool：呼叫公司 RAG 服務，檢索知識庫中相關的文件片段。
 
 對接的是內部 RAG Local Service 的 POST /api/v1/query，
 它會做「檢索 → 重排序」並回傳一組節點（text / score / metadata）。
-這個 skill 只負責取回相關片段；答案由 harness 裡的模型根據片段生成。
+這個 tool 只負責取回相關片段；答案由 backend 那邊的模型根據片段生成。
+
+emp_id 從 HTTP header（X-Emp-Id）取得，不是 tool 的參數——backend 呼叫這個
+tool 時會依「目前登入者」把 emp_id 放進 header；這個 header 不會出現在
+LLM 看到的 tool schema 裡（見 Context.headers 的用法），確保「用誰的權限
+查」這件事只能由後端依登入者身分決定，模型看不到、也改不動。
 """
 import json
 import os
 import re
 
 import httpx
+from mcp.server.mcpserver.context import Context
+from mcp_types import CallToolResult, TextContent
 
 from app.module import db_client as db
 from app.module.logs import get as get_logger
-from .base import Skill
 
 log = get_logger("knowledge_search")
 
@@ -43,18 +49,9 @@ def _needs_expanded_search(query: str) -> bool:
 
 
 # 權限過濾。RAG 服務的 filter 欄位為必填。
-# 優先順序：呼叫端傳進來的 emp_id（依 emp_id 查 DB 裡存的 filter_criteria，見
-# db_api 的 user_permissions 表、db_client.get_permission_by_emp_id）
+# 優先順序：呼叫端帶的 emp_id（依 emp_id 查 db_api 的 user_permissions 表）
 # → 沒有 emp_id 或查詢失敗 → 退回環境變數 RAG_FILTER（沒設就是空陣列，不加限制）。
 # Fail-open：DB 查詢失敗絕不能讓檢索整個掛掉，退回環境變數繼續查。
-#
-# emp_id 用「明確參數」一路從 chat.py 傳進來（Harness → 綁定過 emp_id 的
-# knowledge_search 工具 → 這裡），不是用 contextvar：SSE 用 StreamingResponse
-# 時，Starlette 對這種 sync generator 每次 next() 都是丟進 threadpool、
-# 每次都重新複製一份 context 執行，contextvar 在某次 yield 設的值，下一次
-# yield 之後的程式碼不保證還看得到（實測會整個沒作用，甚至在 generator 結束
-# reset() 時噴 "Token was created in a different Context"）。明確傳參數才會
-# 對，跟目前是哪個 thread/context 在跑無關。
 def _env_filter() -> list:
     raw = os.environ.get("RAG_FILTER")
     if not raw:
@@ -80,7 +77,6 @@ def _resolve_filter(emp_id: str | None) -> list:
 
 
 def _query_rag(query: str, topk: int, emp_id: str | None):
-    """呼叫 RAG 服務一次，回傳原始 nodes 清單（失敗時丟例外）。"""
     payload = {"search": query, "filter": _resolve_filter(emp_id), "topk": topk}
     resp = httpx.post(
         f"{RAG_BASE_URL}/api/v1/query",
@@ -118,17 +114,11 @@ def _format(nodes: list):
         "（例如 [5d73300befa4450ea08808ece5a49d38]）標註它依據的來源；"
         "不要自己編號、不要省略字元、不要修改 FileID 內容：\n\n" + "\n\n".join(parts)
     )
-    return (content, sources)
+    return content, sources
 
 
-def _knowledge_search(query: str, emp_id: str | None = None):
-    """在公司知識庫中檢索與問題相關的文件片段。回傳 (給模型的文字, 來源清單)。
-
-    emp_id 只給後端呼叫端用（見上面 _resolve_filter 的說明），Harness 綁定
-    工具時會把這個參數藏起來，不會出現在 LLM 看到的 tool schema 裡——模型
-    不能自己指定要用誰的權限查。
-
-    命中料號格式或 CAR/LL/MRB/報廢 等關鍵字時，直接用擴大過的 topk 查詢；
+def _search(query: str, emp_id: str | None):
+    """命中料號格式或 CAR/LL/MRB/報廢 等關鍵字時，直接用擴大過的 topk 查詢；
     若查詢結果剛好撈滿 topk（代表可能還有更多筆被截斷），且尚未到 RAG_TOPK_MAX，
     會自動再用 RAG_TOPK_MAX 查一次以擴大搜尋範圍。
     """
@@ -138,19 +128,27 @@ def _knowledge_search(query: str, emp_id: str | None = None):
         if len(nodes) >= topk and topk < RAG_TOPK_MAX:
             nodes = _query_rag(query, RAG_TOPK_MAX, emp_id)
     except Exception as e:  # noqa: BLE001
-        return (f"知識庫檢索失敗：{e}", [])
+        return f"知識庫檢索失敗：{e}", []
 
     if not nodes:
-        return ("知識庫中查無相關資料。", [])
+        return "知識庫中查無相關資料。", []
 
     return _format(nodes)
 
 
-SKILL = Skill(
-    name="knowledge_search",
-    description="在公司內部知識庫中檢索與問題相關的文件內容。",
-    when_to_use="使用者的問題涉及公司文件、內部規範、產品或流程等需要查資料才能回答時。",
-    parameters={"query": "要檢索的問題或關鍵字（用自然語言即可）"},
-    run=_knowledge_search,
-    returns_artifact=True,
-)
+def register(server) -> None:
+    @server.tool(
+        name="knowledge_search",
+        description="在公司內部知識庫中檢索與問題相關的文件內容。"
+                    "何時使用：使用者的問題涉及公司文件、內部規範、產品或流程等需要查資料才能回答時。",
+    )
+    def knowledge_search(query: str, ctx: Context) -> CallToolResult:
+        """要檢索的問題或關鍵字（用自然語言即可）"""
+        emp_id = (ctx.headers or {}).get("x-emp-id")
+        content, sources = _search(query, emp_id)
+        # content 給模型讀；sources 走 structured_content，給 backend 組「參考資料」用
+        # （對齊原本 in-process 版本的 content_and_artifact 設計）。
+        return CallToolResult(
+            content=[TextContent(type="text", text=content)],
+            structured_content={"sources": sources},
+        )

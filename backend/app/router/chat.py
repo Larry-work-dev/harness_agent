@@ -326,7 +326,13 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 yield sse({"type": "done"}); return
 
             if mode == "auto_route":
-                subtasks = orchestrator.plan(req.message)
+                # 分類要看得到最近對話，不然像「那改列台中給我」這種承接前文的追問，
+                # 單看這句話字面完全看不出要查資料，會被誤判成語意分析（見 orchestrator.classify）。
+                _summary, _recent = memory.build_context(req.conversation_id)
+                _recent = _recent[:-1] if _recent else _recent
+                _hist_text = ("\n".join(f"{m['role']}：{m['content']}" for m in _recent[-4:])
+                              if _recent else "")
+                subtasks = orchestrator.plan(req.message, _hist_text)
                 log.info("→ 走 Planner→Worker→Critic（%d 步）", len(subtasks))
                 yield from run_plan(subtasks, ctx)
                 yield sse({"type": "done"}); return

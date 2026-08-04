@@ -17,8 +17,8 @@ import re
 
 from app.config import create_model
 from app.module import agent_config as cfg
+from app.module import mcp_client
 from app.module.logs import get as get_logger
-from app.module.skills.knowledge_search import _knowledge_search
 
 log = get_logger("orchestrator")
 
@@ -35,13 +35,14 @@ RETRIEVAL_TASK_TYPES = {t.strip() for t in
 
 
 def retrieve(query: str, emp_id: str | None = None) -> tuple[str, list]:
-    """呼叫公司知識庫（RAG），回 (檢索內容, 來源清單)。失敗時回錯誤訊息與空來源。
+    """呼叫公司知識庫（RAG，經獨立的 mcp_server），回 (檢索內容, 來源清單)。
+    失敗時回錯誤訊息與空來源。
 
     emp_id 明確由呼叫端（chat.py，依登入者身分）傳入，不是 contextvar——
-    這裡是 harness.use_tools=False 時的安全網路徑，跟 harness.py 綁 tool
-    用的閉包參數是同一套明確傳參數的做法，理由見 harness._bind_emp_id 的說明。
+    這裡是 harness.use_tools=False 時的安全網路徑（gateway 不支援 tool
+    calling，Worker 自己叫不了 tool，chat.py 才會在呼叫 Worker 前先幫它查一次）。
     """
-    return _knowledge_search(query, emp_id=emp_id)
+    return mcp_client.call_knowledge_search(query, emp_id)
 
 
 # 引用標記是 RAG 服務 metadata 的 FileID（32 碼 hex 或含 dash 的 UUID），
@@ -91,15 +92,22 @@ def _parse_json(text: str) -> dict:
     return json.loads(m.group(0)) if m else {}
 
 
-def classify(text: str) -> dict:
-    """便宜 LLM 分類：回 {composite, task_type} 或 {composite, subtasks}。失敗→單一語意分析。"""
+def classify(text: str, history_text: str = "") -> dict:
+    """便宜 LLM 分類：回 {composite, task_type} 或 {composite, subtasks}。失敗→單一語意分析。
+
+    history_text：最近對話（若有）。多輪對話裡常見「那改列台中給我」「那換一個」這種
+    省略主詞、承接前文才看得懂意圖的追問——只看這句話本身完全不像需要查知識庫，
+    但接在「查詢公司特約飯店」這種 RAG 任務後面，其實還是同一種任務類型。分類器只
+    看單一句子會判斷不出來，必須把最近對話一起餵給它才判斷得對。
+    """
     types = cfg.valid_task_types()
     default_tt = "語意分析" if "語意分析" in types else types[0]
     sys = cfg.planner_prompt().replace("{{TASK_TYPES}}", "、".join(types))
+    user = f"最近對話：\n{history_text}\n\n使用者最新需求：{text}" if history_text else text
     try:
         model = create_model(spec=cfg.model_spec(_CLASSIFIER_MODEL or cfg.local_default()))
         out = model.invoke([{"role": "system", "content": sys},
-                            {"role": "user", "content": text}]).content
+                            {"role": "user", "content": user}]).content
         plan = _parse_json(out)
         if plan.get("composite"):
             subs = [s for s in plan.get("subtasks", [])
@@ -139,13 +147,16 @@ def classify_image_task(text: str) -> str:
     return "圖面理解" if "圖面理解" in img_types else img_types[0]
 
 
-def plan(text: str) -> list[dict]:
+def plan(text: str, history_text: str = "") -> list[dict]:
     """Planner：一律回傳 >=1 個 {'task_type':..., 'desc':...}。
 
     單一任務包成 1 筆清單，下游（chat.py 的 run_plan）不用再分兩條路；
     複合任務則原樣回傳 classify() 拆解出的 subtasks。
+
+    history_text 一路傳給 classify()：多輪對話裡「那改列台中給我」這種承接
+    前文的追問，沒有歷史脈絡分類器會誤判成不需要查資料的「語意分析」。
     """
-    result = classify(text)
+    result = classify(text, history_text)
     if result["composite"]:
         return result["subtasks"]
     return [{"task_type": result["task_type"], "desc": text}]

@@ -1,5 +1,4 @@
-"""Skill：計算機。"""
-from .base import Skill
+"""Tool：計算機。"""
 
 
 def _calculate(expression: str) -> str:
@@ -13,10 +12,11 @@ def _calculate(expression: str) -> str:
         return f"計算錯誤：{e}"
 
 
-SKILL = Skill(
-    name="calculator",
-    description="計算數學算式並回傳結果。",
-    when_to_use="使用者需要做算術或數值運算時。",
-    parameters={"expression": "算式字串，例如 '(12 + 8) * 3'"},
-    run=_calculate,
-)
+def register(server) -> None:
+    @server.tool(
+        name="calculator",
+        description="計算數學算式並回傳結果。何時使用：使用者需要做算術或數值運算時。",
+    )
+    def calculator(expression: str) -> str:
+        """算式字串，例如 '(12 + 8) * 3'"""
+        return _calculate(expression)

@@ -11,13 +11,21 @@ services:
     networks: [harness-net]
     # 內部服務，不需對外開埠；要除錯可加 ports: ["9000:9000"]
 
+  mcp_server:
+    container_name: harness-mcp_server
+    build: ./mcp_server
+    env_file: ./mcp_server/.env         # RAG 位址等設定（tool-calling 從 backend 搬過來的）
+    depends_on: [db_api]
+    networks: [harness-net]
+    # 內部服務，只有 backend 會連；不需對外開埠，要除錯可加 ports: ["9200:9200"]
+
   backend:
-    container_name: harness-backend 
+    container_name: harness-backend
     build: ./backend
-    env_file: ./backend/.env          
+    env_file: ./backend/.env
     volumes:
       - /home/larry/playgroung/harness_agent/tmp/attachments:/data/attachments
-    depends_on: [db_api]
+    depends_on: [db_api, mcp_server]
     ports:
       - "8000:8000"
     networks: [harness-net]

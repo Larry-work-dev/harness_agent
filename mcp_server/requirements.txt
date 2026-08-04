@@ -1,0 +1,5 @@
+# 獨立 MCP tool server（Streamable HTTP）：把原本 backend 內建的 skill 搬出來，
+# backend 改用 MCP client 呼叫這裡的 tool。
+mcp==2.0.0
+httpx==0.28.1
+python-dotenv==1.2.2
