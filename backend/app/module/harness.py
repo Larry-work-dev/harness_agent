@@ -135,7 +135,12 @@ class Harness:
                 elif node == "tools":
                     for m in update["messages"]:
                         event = {"type": "skill_result", "skill": m.name, "result": m.content}
-                        sources = getattr(m, "artifact", None)
-                        if sources:
-                            event["sources"] = sources
+                        # artifact 形狀依 tool 而定：knowledge_search 是來源清單（list），
+                        # create_excel/word/ppt 是產生的檔案（dict：filename/mime/data_base64）。
+                        # 見 mcp_client.build_tools 的 _SOURCES_TOOLS / _FILE_TOOLS。
+                        artifact = getattr(m, "artifact", None)
+                        if isinstance(artifact, list) and artifact:
+                            event["sources"] = artifact
+                        elif isinstance(artifact, dict) and artifact:
+                            event["file"] = artifact
                         yield event

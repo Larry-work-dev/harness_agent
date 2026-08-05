@@ -29,9 +29,16 @@ _CRITIC_MODEL = os.environ.get("AGENT_CRITIC_MODEL") or cfg.local_default()
 _QUERY_REWRITE_MODEL = os.environ.get("AGENT_QUERY_REWRITE_MODEL") or _CLASSIFIER_MODEL
 QUERY_REWRITE_ENABLED = os.environ.get("QUERY_REWRITE_ENABLED", "true").lower() == "true"
 
-# 這些任務類型需要「查公司知識庫」——sub-agent 會先呼叫 RAG 再交給模型（不需 gateway tool-calling）
-RETRIEVAL_TASK_TYPES = {t.strip() for t in
-                        os.environ.get("RETRIEVAL_TASK_TYPES", "RAG切片").split(",") if t.strip()}
+# 需要「先查公司知識庫再交給模型」的任務類型（沒有 gateway tool-calling 時的安全網）。
+# 用「子字串標記」而非完整類型名比對：routing_table.json 的類型名稱是人手改的、會變
+# （例如 RAG切片 → RAG切片/知識庫問答，未來可能又改成別的），只要名稱含這些標記就算，
+# 一改名不會漏掉檢索。可用環境變數 RETRIEVAL_TASK_MARKERS（逗號分隔）覆寫。
+RETRIEVAL_TASK_MARKERS = [m.strip() for m in
+                          os.environ.get("RETRIEVAL_TASK_MARKERS", "RAG,知識庫").split(",") if m.strip()]
+
+
+def is_retrieval_task(task_type: str) -> bool:
+    return any(m in (task_type or "") for m in RETRIEVAL_TASK_MARKERS)
 
 
 def retrieve(query: str, emp_id: str | None = None) -> tuple[str, list]:
@@ -92,6 +99,34 @@ def _parse_json(text: str) -> dict:
     return json.loads(m.group(0)) if m else {}
 
 
+# 意圖路由器認得的七種意圖（對齊公司現有入口的路由規則）
+INTENTS = {"leave", "system_dev", "translate", "summary", "sign", "contact", "kbchat"}
+
+
+def classify_intent(text: str) -> dict:
+    """企業前門意圖路由：把使用者輸入分成 INTENTS 七類，回 {'intent': ..., 'keywords': [...]}。
+
+    這是「公司現有入口」用的那套路由規則（見 agents/intent_router.md），放在最前面當
+    front door；只有 kbchat 會往下進到 Planner/RAG 這條開放式管道。用便宜的分類器模型，
+    Fail-open：任何例外一律回 kbchat（最不會出錯的預設，會走一般問答/知識庫）。
+    """
+    sys = cfg.intent_router_prompt()
+    try:
+        out = create_model(spec=cfg.model_spec(_CLASSIFIER_MODEL or cfg.local_default())).invoke(
+            [{"role": "system", "content": sys}, {"role": "user", "content": text}]).content
+        data = _parse_json(out)
+        intent = data.get("intent")
+        if intent in INTENTS:
+            kws = data.get("keywords")
+            kws = [str(k) for k in kws] if isinstance(kws, list) else []
+            log.info("classify_intent → %s, keywords=%s", intent, kws)
+            return {"intent": intent, "keywords": kws}
+        log.warning("classify_intent → 意圖不在清單(%r)，用 kbchat", data)
+    except Exception as e:  # noqa: BLE001
+        log.warning("classify_intent 失敗(%s)，用 kbchat", e)
+    return {"intent": "kbchat", "keywords": []}
+
+
 def classify(text: str, history_text: str = "") -> dict:
     """便宜 LLM 分類：回 {composite, task_type} 或 {composite, subtasks}。失敗→單一語意分析。
 
@@ -147,15 +182,22 @@ def classify_image_task(text: str) -> str:
     return "圖面理解" if "圖面理解" in img_types else img_types[0]
 
 
-def plan(text: str, history_text: str = "") -> list[dict]:
+def plan(text: str, history_text: str = "", forced_task_type: str | None = None) -> list[dict]:
     """Planner：一律回傳 >=1 個 {'task_type':..., 'desc':...}。
 
     單一任務包成 1 筆清單，下游（chat.py 的 run_plan）不用再分兩條路；
     複合任務則原樣回傳 classify() 拆解出的 subtasks。
 
+    forced_task_type：前門意圖路由已經明確判定類型時（translate→文件翻譯、
+    summary→語意分析）直接用，不再叫 Planner 重新分類——意圖路由是唯一前門，
+    它說了算，省一次 LLM 呼叫也避免兩個分類器意見不一致。只有 kbchat 這種開放式
+    才會 forced_task_type=None、走完整 Planner（含複合拆解與 RAG 偵測規則）。
+
     history_text 一路傳給 classify()：多輪對話裡「那改列台中給我」這種承接
     前文的追問，沒有歷史脈絡分類器會誤判成不需要查資料的「語意分析」。
     """
+    if forced_task_type:
+        return [{"task_type": forced_task_type, "desc": text}]
     result = classify(text, history_text)
     if result["composite"]:
         return result["subtasks"]
@@ -181,7 +223,7 @@ def review(sub: dict, output: str, extra_system: str, tool_sources: list, full_r
     """Critic：審核 Worker 產出。回 {'pass': bool, 'reason': str, 'feedback': str}。
 
     extra_system 是 Worker 當時實際看到的完整上下文（build_worker_prompt() 組出來的，
-    已經包含 ctx 裡的附件/先前上傳文件片段、以及 RETRIEVAL_TASK_TYPES 的安全網檢索內容）——
+    已經包含 ctx 裡的附件/先前上傳文件片段、以及檢索任務（is_retrieval_task）的安全網檢索內容）——
     一定要把這個給 Critic 看，否則 Critic 只看得到窄窄一份 tool_sources 清單，
     會把「根據 ctx 裡文件內容回答」誤判成憑空捏造來源（曾實際發生：使用者上傳文件問問題，
     Worker 依附件內容回答並標註來源，Critic 卻因為看不到那份附件內容而判定捏造）。

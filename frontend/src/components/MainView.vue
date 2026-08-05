@@ -125,7 +125,8 @@ async function selectConversation(cid) {
     if (m.role === 'user') items.value.push({ kind: 'user', text: m.content, attachments: m.attachments || [], time: m.created_at })
     else {
       const sources = {}; (m.sources || []).forEach(s => (sources[s.n] = s))
-      items.value.push({ kind: 'agent', html: renderMarkdown(m.content, sources), text: m.content, time: m.created_at })
+      items.value.push({ kind: 'agent', html: renderMarkdown(m.content, sources), text: m.content,
+                         attachments: m.attachments || [], time: m.created_at })
     }
   }
   scrollDown()
@@ -163,7 +164,7 @@ async function send() {
   items.value.push({ kind: 'user', text, attachments: atts, time: new Date().toISOString() })
   scrollDown()
 
-  const pending = {}, sources = {}
+  const pending = {}, sources = {}, generatedFiles = []
   try {
     const res = await fetch(API + '/chat', {
       method: 'POST',
@@ -187,8 +188,14 @@ async function send() {
         } else if (ev.type === 'skill_result') {
           const t = (pending[ev.skill] || []).shift(); if (t) t.result = ev.result
           if (ev.sources) ev.sources.forEach(s => (sources[s.n] = s))
+          // 剛產生的檔案（create_excel/word/ppt）：這時候還沒存進附件目錄、拿不到
+          // path，先把 base64 內容留著，畫面上直接用瀏覽器端下載（見 download()），
+          // 之後重整頁面會改讀 DB 存好的附件（有 path，走一般下載）。
+          if (ev.file) generatedFiles.push({ name: ev.file.filename, mime: ev.file.mime,
+                                              data_base64: ev.file.data_base64, kind: 'doc' })
         } else if (ev.type === 'final') {
-          items.value.push({ kind: 'agent', html: renderMarkdown(ev.content, sources), text: ev.content, time: new Date().toISOString() })
+          items.value.push({ kind: 'agent', html: renderMarkdown(ev.content, sources), text: ev.content,
+                             attachments: generatedFiles.slice(), time: new Date().toISOString() })
         } else if (ev.type === 'critic') {
           items.value.push({ kind: 'trace', skill: `critic:${ev.task_type}`, args: '',
             result: (ev.verdict === 'pass' ? '✅ 通過' : '🔁 重試') + '：' + ev.reason })
@@ -209,6 +216,20 @@ async function send() {
 }
 
 async function download(a) {
+  // 剛產生、還沒重整過的檔案：沒有 path（還沒存進附件目錄），但瀏覽器已經拿到完整
+  // base64 內容，直接組 Blob 下載，不用再打一次 API。
+  if (!a.path && a.data_base64) {
+    const bin = atob(a.data_base64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    const blob = new Blob([bytes], { type: a.mime || 'application/octet-stream' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url; link.download = a.name || 'download'
+    document.body.appendChild(link); link.click(); link.remove()
+    URL.revokeObjectURL(url)
+    return
+  }
   try { await downloadAttachment(a) } catch (e) { toast('下載失敗：' + e.message) }
 }
 
@@ -325,6 +346,11 @@ async function copy(text, i) {
               <div class="avatar agent">AI</div>
               <div class="col">
                 <div class="bubble" v-html="it.html"></div>
+                <div v-if="it.attachments && it.attachments.length" class="msg-atts">
+                  <button v-for="(a, ai) in it.attachments" :key="ai" class="msg-att" title="下載" @click="download(a)">
+                    {{ a.kind === 'image' ? '🖼' : '📄' }} {{ a.name }}
+                  </button>
+                </div>
                 <div class="meta">
                   <span class="time" v-if="it.time">{{ formatTime(it.time) }}</span>
                   <button class="copy" @click="copy(it.text, i)">

@@ -8,6 +8,8 @@
     agents/critic.md       Critic：審核 Worker 產出的 prompt
     agents/orchestrator.md 多 subtask 時的組裝（assemble）階段 prompt
     agents/query_rewrite.md 查詢改寫器：RAG 檢索前把指代不明的原句改寫成獨立查詢
+    agents/intent_router.md 前門意圖路由：把使用者輸入分成 leave/system_dev/translate/
+                            summary/sign/contact/kbchat 七類（對齊公司現有入口的路由規則）
 
 改這些 md/json 即可調整行為，不必動程式。docker 可把此目錄掛成 volume 以便即時編輯。
 """
@@ -39,6 +41,12 @@ DEFAULT_CRITIC = (
 DEFAULT_QUERY_REWRITE = (
     "根據最近對話（若有）跟使用者原句，改寫成一句獨立、明確、適合語意檢索的查詢；"
     "已經明確獨立就原樣輸出。只輸出改寫後的查詢本身。"
+)
+DEFAULT_INTENT_ROUTER = (
+    "你是企業意圖路由中心。把使用者輸入分類成 "
+    "leave / system_dev / translate / summary / sign / contact / kbchat 其中之一，"
+    "無法明確歸類一律 kbchat。"
+    '只輸出 JSON：{"intent": "<其中之一>", "keywords": []}。'
 )
 
 
@@ -170,3 +178,7 @@ def critic_prompt() -> str:
 
 def query_rewrite_prompt() -> str:
     return _read("agents/query_rewrite.md", DEFAULT_QUERY_REWRITE)
+
+
+def intent_router_prompt() -> str:
+    return _read("agents/intent_router.md", DEFAULT_INTENT_ROUTER)

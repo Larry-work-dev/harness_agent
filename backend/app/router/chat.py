@@ -4,6 +4,7 @@
   圖片 → 強制走視覺模型（本地 Qwen3-VL），多模態訊息生成（OCR/圖面理解由此打通）
   文件 → ephemeral：本回合抽字注入；RAG：上傳時已 embedding 進 doc_chunks，開放式問答時檢索注入
 """
+import base64
 import json
 import os
 
@@ -56,6 +57,20 @@ def resolve_override(user, model_str):
     return {"profile": None, "label": model_str}
 
 
+def _save_generated_files(conversation_id: str, file_events: list[dict]) -> list[dict]:
+    """把 create_excel/create_word/create_ppt 產生的檔案（base64）存進附件目錄，
+    沿用使用者上傳檔案的同一套儲存/下載機制（見 app/module/attachments.py），
+    回傳可以掛在 assistant 訊息 attachments 欄位的中繼資料清單。"""
+    saved = []
+    for f in file_events:
+        try:
+            data = base64.b64decode(f["data_base64"])
+            saved.append(att.save_upload(conversation_id, f["filename"], data))
+        except Exception as e:  # noqa: BLE001
+            log.warning("儲存產生的檔案失敗(%s): %s", f.get("filename"), e)
+    return saved
+
+
 @router.post("/chat")
 def chat(req: ChatRequest, user=Depends(current_user)):
     conv = require_conversation(req.conversation_id, user)
@@ -96,7 +111,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         decision = {"mode": "generate", "profile": None, "spec": cfg.model_spec(mid),
                     "reason": "含敏感資料，限本地模型", "label": mid}
     else:
-        d = routing.route(req.message, embedder=embedder)
+        d = routing.route(req.message)
         decision = {**d, "spec": None, "label": d.get("workflow") or "路由中"}
 
     log.info("decision: user=%s conv_mode=%s imgs=%d docs=%d → mode=%s label=%s (%s)",
@@ -157,18 +172,22 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         hist = ([{"role": "system", "content": "以下是先前對話的摘要：\n" + summary}] if summary else []) + recent
         model = create_model(profile=decision.get("profile"), spec=decision.get("spec"), temperature=0.0)
         harness = Harness(model, emp_id=user.get("emp_id"))
-        final_content = None; collected = {}
+        final_content = None; collected = {}; generated_files = []
         for ev in harness.run(req.message, history=hist, memory_context=memory_text, extra_system=ctx):
-            if ev["type"] == "skill_result" and ev.get("sources"):
-                for s in ev["sources"]:
-                    collected[s["n"]] = s
+            if ev["type"] == "skill_result":
+                if ev.get("sources"):
+                    for s in ev["sources"]:
+                        collected[s["n"]] = s
+                if ev.get("file"):
+                    generated_files.append(ev["file"])
             if ev["type"] == "final":
                 final_content = ev["content"]
             yield sse(ev)
         if final_content is not None:
             all_collected = [collected[n] for n in sorted(collected)]
             sources = orchestrator.cited_sources(final_content, all_collected)
-            db.add_message(req.conversation_id, "assistant", final_content, sources or None)
+            atts = _save_generated_files(req.conversation_id, generated_files)
+            db.add_message(req.conversation_id, "assistant", final_content, sources or None, atts or None)
             memory.maybe_summarize(model, req.conversation_id)
             learned = memory.extract_and_store(model, embedder, user["id"], req.message, final_content)
             if learned:
@@ -177,12 +196,18 @@ def chat(req: ChatRequest, user=Depends(current_user)):
     def run_plan(subtasks, ctx):
         """Planner 已把需求拆成 >=1 個 subtask；逐一用 Harness（Worker）執行 + Critic 審核，
         單一 subtask 時直接用其輸出，多個 subtask 時用 assemble() 組裝成一份回覆。"""
-        yield sse({"type": "routing",
-                   "mode": "composite" if len(subtasks) > 1 else "single",
-                   "model": f"複合任務 {len(subtasks)} 步" if len(subtasks) > 1 else subtasks[0]["task_type"],
-                   "actual_model": None,
-                   "reason": (f"Planner 拆解 {len(subtasks)} 步"
-                              if len(subtasks) > 1 else f"單一任務：{subtasks[0]['task_type']}")})
+        # 路由泡泡：reason 說「是什麼任務類型」，model 顯示「實際挑到的模型名」
+        # （不要把 task_type 塞進 model 欄位——那會顯示成「模型：RAG切片/知識庫問答」）。
+        if len(subtasks) > 1:
+            yield sse({"type": "routing", "mode": "composite",
+                       "model": f"複合任務 {len(subtasks)} 步", "actual_model": None,
+                       "reason": f"Planner 拆解 {len(subtasks)} 步"})
+        else:
+            _tt = subtasks[0]["task_type"]
+            _primary, _ = cfg.primary_model(_tt)
+            yield sse({"type": "routing", "mode": "single",
+                       "model": _primary, "actual_model": None,
+                       "reason": f"單一任務：{_tt}"})
 
         # 記憶只在整個 turn 處理一次（不分單一/複合）
         summary, recent = memory.build_context(req.conversation_id)
@@ -194,7 +219,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         max_retries = int(os.environ.get("CRITIC_MAX_RETRIES", "1"))
         max_fallback_retries = int(os.environ.get("WORKER_FALLBACK_MAX_RETRIES", "1"))
 
-        results = []; prior = ""; all_sources: dict = {}
+        results = []; prior = ""; all_sources: dict = {}; all_generated_files = []
 
         for i, sub in enumerate(subtasks):
             is_first = (i == 0)
@@ -204,7 +229,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
 
             # 檢索 safety net：只在沒有 tool-calling 能力時才做，且只做一次、不隨 retry 重做
             retrieved, retrieved_sources = "", []
-            if not harness.use_tools and sub["task_type"] in orchestrator.RETRIEVAL_TASK_TYPES:
+            if not harness.use_tools and orchestrator.is_retrieval_task(sub["task_type"]):
                 base_q = sub["desc"] if not prior else f"{sub['desc']}（脈絡：{prior[:400]}）"
                 hist_text = ("\n".join(f"{m['role']}：{m['content']}" for m in recent[-4:])
                              if is_first and recent else "")
@@ -216,7 +241,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
             retry_feedback, attempt, fallback_attempts = None, 0, 0
             while True:
                 extra_system = orchestrator.build_worker_prompt(sub, prior, ctx, retrieved, retry_feedback)
-                events_yielded, final_text, attempt_sources = 0, None, []
+                events_yielded, final_text, attempt_sources, attempt_files = 0, None, [], []
                 try:
                     for ev in harness.run(sub["desc"], history=hist if is_first else None,
                                           memory_context=memory_text if is_first else None,
@@ -224,8 +249,11 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                         events_yielded += 1
                         if ev["type"] == "final":
                             final_text = ev["content"]; continue  # 吞掉，不當整輪 SSE final 轉發
-                        if ev["type"] == "skill_result" and ev.get("sources"):
-                            attempt_sources.extend(ev["sources"])
+                        if ev["type"] == "skill_result":
+                            if ev.get("sources"):
+                                attempt_sources.extend(ev["sources"])
+                            if ev.get("file"):
+                                attempt_files.append(ev["file"])
                         ev = {**ev, "subtask_index": i, "attempt": attempt}
                         yield sse(ev)
                 except Exception as e:  # noqa: BLE001
@@ -260,11 +288,13 @@ def chat(req: ChatRequest, user=Depends(current_user)):
             prior += f"\n[{sub['task_type']}] {final_text}"
             for s in retrieved_sources + attempt_sources:
                 all_sources.setdefault((s.get("name"), s.get("url")), s)
+            all_generated_files.extend(attempt_files)
 
         final = orchestrator.assemble(req.message, results, ctx) if len(subtasks) > 1 else results[0]["output"]
 
         sources = orchestrator.cited_sources(final, list(all_sources.values()))
-        db.add_message(req.conversation_id, "assistant", final, sources or None)
+        atts = _save_generated_files(req.conversation_id, all_generated_files)
+        db.add_message(req.conversation_id, "assistant", final, sources or None, atts or None)
         yield sse({"type": "final", "content": final})
 
         mem_model = create_model(spec=cfg.model_spec(cfg.local_default()))
@@ -332,7 +362,9 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 _recent = _recent[:-1] if _recent else _recent
                 _hist_text = ("\n".join(f"{m['role']}：{m['content']}" for m in _recent[-4:])
                               if _recent else "")
-                subtasks = orchestrator.plan(req.message, _hist_text)
+                # 前門意圖是 translate/summary 時已定死 task_type，plan() 就不再重新分類；
+                # kbchat 則 forced_task_type=None，走完整 Planner（含複合拆解與 RAG 偵測）。
+                subtasks = orchestrator.plan(req.message, _hist_text, decision.get("forced_task_type"))
                 log.info("→ 走 Planner→Worker→Critic（%d 步）", len(subtasks))
                 yield from run_plan(subtasks, ctx)
                 yield sse({"type": "done"}); return
@@ -342,9 +374,9 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                        "reason": decision["reason"]})
 
             if mode == "workflow":
-                log.info("→ 走 workflow: %s", decision["workflow"])
+                log.info("→ 走 workflow: %s（keywords=%s）", decision["workflow"], decision.get("keywords"))
                 wf = get_workflow(decision["workflow"])
-                result = wf.run(req.message) if wf else "找不到對應的流程。"
+                result = wf.run(req.message, decision.get("keywords") or []) if wf else "找不到對應的流程。"
                 db.add_message(req.conversation_id, "assistant", result)
                 yield sse({"type": "final", "content": result})
                 yield sse({"type": "done"}); return

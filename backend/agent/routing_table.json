@@ -24,7 +24,7 @@
     "文件翻譯":   { "Qwen3-VL": 75,  "GPT-5.4": 83,  "GPT-4.1": 82,  "Grok-4.3": 72, "Gemma-4-31B": 70 },
     "語意分析":   { "Qwen3-VL": 100, "GPT-5.4": 100, "GPT-4.1": 100, "Grok-4.3": 62, "Gemma-4-31B": 100 },
     "圖面理解":   { "Qwen3-VL": 90,  "GPT-5.4": 82,  "GPT-4.1": 82,  "Grok-4.3": 85, "Gemma-4-31B": 78 },
-    "RAG切片":    { "Qwen3-VL": 88,  "GPT-5.4": 85,  "GPT-4.1": 91,  "Grok-4.3": 83, "Gemma-4-31B": 85 }
+    "RAG切片/知識庫問答": { "Qwen3-VL": 88,  "GPT-5.4": 85,  "GPT-4.1": 91,  "Grok-4.3": 83, "Gemma-4-31B": 85 }
   },
   "routing_table": [
     {
@@ -90,7 +90,7 @@
       ]
     },
     {
-      "task_type": "RAG切片",
+      "task_type": "RAG切片/知識庫問答",
       "primary": "gpt-4.1",
       "primary_score": 91,
       "fallback": "Qwen3-VL",

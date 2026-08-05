@@ -16,7 +16,6 @@ import httpx
 from langchain_core.tools import StructuredTool
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from pydantic import create_model
 
 from app.module.logs import get as get_logger
 
@@ -24,12 +23,14 @@ log = get_logger("mcp_client")
 
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://mcp_server:9200/mcp")
 
-_JSON_TYPE_MAP = {"string": str, "integer": int, "number": float, "boolean": bool}
-
-# 這幾個 tool 的 structured_content 帶了「參考資料」（sources），要用
-# content_and_artifact 模式，harness 才抽得出 sources 給前端顯示；
-# 其他 tool（calculator/text_stats/get_weather）只有純文字結果。
-_ARTIFACT_TOOLS = {"knowledge_search"}
+# 這些 tool 的 structured_content 帶了「參考資料」（sources 陣列），要用
+# content_and_artifact 模式，harness 才抽得出 sources 給前端顯示。
+# web_search / read_url 也會回 sources（每筆帶短 hex 代號 + url），走同一套引用/來源渲染。
+_SOURCES_TOOLS = {"knowledge_search", "web_search", "read_url"}
+# 這些 tool 的 structured_content 帶了「產生的檔案」（filename/mime/data_base64），
+# 一樣要用 content_and_artifact，chat.py 會把它存成附件、讓使用者下載。
+_FILE_TOOLS = {"create_excel", "create_word", "create_ppt"}
+_ARTIFACT_TOOLS = _SOURCES_TOOLS | _FILE_TOOLS
 
 
 async def _list_tools_async() -> list[dict]:
@@ -69,16 +70,6 @@ def list_tools_metadata() -> list[dict]:
              "parameters": s["input_schema"].get("properties", {})} for s in _tool_specs()]
 
 
-def _schema_to_pydantic(name: str, schema: dict):
-    props = schema.get("properties", {})
-    required = set(schema.get("required", []))
-    fields = {}
-    for pname, pschema in props.items():
-        pytype = _JSON_TYPE_MAP.get(pschema.get("type"), str)
-        fields[pname] = (pytype, ... if pname in required else None)
-    return create_model(f"{name}_Args", **fields)
-
-
 def call_knowledge_search(query: str, emp_id: str | None = None) -> tuple[str, list]:
     """給不經過 tool-calling 的安全網路徑用（harness.use_tools=False，gateway 不支援
     tool calling 時，orchestrator.retrieve() 直接呼叫這裡，不透過 LLM/tool schema）。"""
@@ -105,19 +96,33 @@ def build_tools(emp_id: str | None) -> list[StructuredTool]:
             except Exception as e:  # noqa: BLE001
                 log.warning("呼叫 mcp tool %s 失敗(%s)", name, e)
                 text, structured = f"工具呼叫失敗：{e}", {}
-            if name in _ARTIFACT_TOOLS:
+            if name in _SOURCES_TOOLS:
                 return text, structured.get("sources") or []
+            if name in _FILE_TOOLS:
+                file_info = structured.get("data_base64") and {
+                    "filename": structured.get("filename"),
+                    "mime": structured.get("mime"),
+                    "data_base64": structured.get("data_base64"),
+                }
+                return text, file_info or None
             return text
         return _run
 
     tools = []
     for spec in _tool_specs():
         name = spec["name"]
+        # args_schema 直接用 mcp_server 回傳的原始 JSON schema（含巢狀 $defs），
+        # 不要自己再轉一份 pydantic model——LangChain 的 StructuredTool 本來就
+        # 接受 dict 當 args_schema，且 convert_to_openai_tool() 會把 $ref 完整
+        # 展開進最終送給模型的 schema。曾經自己動手轉型別（陣列/物件都轉成
+        # 泛用的 list/dict），結果巢狀欄位的名稱/說明全部消失，模型看不到
+        # sheets/sections/slides 裡面該填哪些欄位，一直猜錯導致 LangGraph
+        # 撞 recursion limit——直接沿用原始 schema 才能保留完整欄位資訊。
         tools.append(StructuredTool.from_function(
             func=_make_run(name),
             name=name,
             description=spec["description"],
-            args_schema=_schema_to_pydantic(name, spec["input_schema"]),
+            args_schema=spec["input_schema"],
             response_format="content_and_artifact" if name in _ARTIFACT_TOOLS else "content",
         ))
     return tools

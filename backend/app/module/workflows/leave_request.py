@@ -2,7 +2,7 @@
 from .base import Workflow
 
 
-def _run(query: str) -> str:
+def _run(query: str, keywords: list | None = None) -> str:
     # 實務上這裡會呼叫共用 Tool 層（例如查假別、寫入 HR 系統、寄通知信）。
     return (
         "已為你啟動「請假申請」流程：\n"

@@ -3,3 +3,12 @@
 mcp==2.0.0
 httpx==0.28.1
 python-dotenv==1.2.2
+
+# 文件產生（create_excel / create_word / create_ppt）
+openpyxl==3.1.5
+python-docx==1.1.2
+python-pptx==1.0.2
+
+# 網路搜尋（web_search / read_url）
+ddgs==9.14.4              # DuckDuckGo 搜尋（免 API key）
+beautifulsoup4==4.15.0   # read_url 把 HTML 抽成純文字（用 python-docx 已帶的 lxml 當 parser）

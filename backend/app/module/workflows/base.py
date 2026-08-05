@@ -14,6 +14,6 @@ from typing import Callable
 class Workflow:
     name: str
     description: str
-    triggers: list[str]                 # 關鍵字（語意服務不可用時的退回比對）
-    run: Callable[[str], str]           # 輸入使用者訊息，回傳最終回應文字
-    examples: list[str] = field(default_factory=list)  # 意圖範例句（語意比對優先用這個）
+    triggers: list[str]                 # 關鍵字（前門 LLM 意圖路由改採 intent_router.md，此欄位保留給人看/相容）
+    run: Callable[..., str]             # run(query, keywords=None)：使用者訊息＋意圖路由抓到的關鍵字，回最終回應文字
+    examples: list[str] = field(default_factory=list)  # 意圖範例句（保留給人看/相容）
