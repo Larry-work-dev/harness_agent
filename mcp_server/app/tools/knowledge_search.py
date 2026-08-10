@@ -22,7 +22,7 @@ from app.module.logs import get as get_logger
 
 log = get_logger("knowledge_search")
 
-RAG_BASE_URL = os.environ.get("RAG_BASE_URL", "http://172.16.174.116:8001")
+RAG_BASE_URL = os.environ.get("RAG_BASE_URL", "http://172.16.174.116:8000")
 RAG_TOPK = int(os.environ.get("RAG_TOPK", "5"))
 RAG_TIMEOUT = float(os.environ.get("RAG_TIMEOUT", "30"))
 RAG_VERIFY_SSL = os.environ.get("RAG_VERIFY_SSL", "true").lower() != "false"
@@ -77,7 +77,15 @@ def _resolve_filter(emp_id: str | None) -> list:
 
 
 def _query_rag(query: str, topk: int, emp_id: str | None):
-    payload = {"search": query, "filter": _resolve_filter(emp_id), "topk": topk}
+    payload = {
+        "search": query,
+        "filter": _resolve_filter(emp_id),
+        "topk": topk,
+        # RAG API 現在分兩階段：r_topk 是檢索階段的候選數（預設 30），
+        # topk 是 rerank 後篩到的輸出數。若 topk 超過 r_topk 預設值，
+        # 結果會被攔腰砍掉，所以兩個要帶一樣的值，維持「topk 就是總筆數」的語意。
+        "r_topk": topk,
+    }
     resp = httpx.post(
         f"{RAG_BASE_URL}/api/v1/query",
         json=payload,
@@ -85,7 +93,8 @@ def _query_rag(query: str, topk: int, emp_id: str | None):
         verify=RAG_VERIFY_SSL,
     )
     resp.raise_for_status()
-    return resp.json()
+    # 回應現在包成 {"results": [...], "timing": {...}}，不再是裸陣列。
+    return resp.json().get("results", [])
 
 
 def _format(nodes: list):
