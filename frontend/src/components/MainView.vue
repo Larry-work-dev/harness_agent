@@ -1,5 +1,5 @@
 <script setup>
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, reactive, nextTick, onMounted } from 'vue'
 import { API, token, setToken, api, esc, renderCitations, renderMarkdown, sourceListHTML, uploadFiles, downloadAttachment } from '../api.js'
 import MemoryPanel from './MemoryPanel.vue'
 
@@ -164,7 +164,16 @@ async function send() {
   items.value.push({ kind: 'user', text, attachments: atts, time: new Date().toISOString() })
   scrollDown()
 
-  const pending = {}, sources = {}, generatedFiles = []
+  const sources = {}, generatedFiles = []
+  // 单一「思考中」指示：路由決策、工具呼叫、critic 檢查全部動態更新同一行文字，
+  // 不再各自變成一條條列出來的訊息；收到 final/error 後這行就整個移除，讓真正的回覆頂上去。
+  const thinking = reactive({ kind: 'thinking', text: '思考中…' })
+  items.value.push(thinking)
+  scrollDown()
+  const dropThinking = () => {
+    const idx = items.value.indexOf(thinking)
+    if (idx !== -1) items.value.splice(idx, 1)
+  }
   try {
     const res = await fetch(API + '/chat', {
       method: 'POST',
@@ -180,35 +189,36 @@ async function send() {
         const line = p.replace(/^data: /, '').trim(); if (!line) continue
         const ev = JSON.parse(line)
         if (ev.type === 'routing') {
-          const actual = ev.actual_model ? ` → ${ev.actual_model}` : ''
-          items.value.push({ kind: 'routing', text: `${ev.reason}（${ev.mode === 'workflow' ? '流程' : '模型'}：${ev.model}${actual}）` })
+          thinking.text = ev.reason
         } else if (ev.type === 'skill_call') {
-          const t = { kind: 'trace', skill: ev.skill, args: JSON.stringify(ev.args), result: '…' }
-          items.value.push(t); (pending[ev.skill] = pending[ev.skill] || []).push(t)
+          thinking.text = `執行 ${ev.skill} 中…`
         } else if (ev.type === 'skill_result') {
-          const t = (pending[ev.skill] || []).shift(); if (t) t.result = ev.result
+          thinking.text = `${ev.skill} 完成，整理回覆中…`
           if (ev.sources) ev.sources.forEach(s => (sources[s.n] = s))
           // 剛產生的檔案（create_excel/word/ppt）：這時候還沒存進附件目錄、拿不到
           // path，先把 base64 內容留著，畫面上直接用瀏覽器端下載（見 download()），
           // 之後重整頁面會改讀 DB 存好的附件（有 path，走一般下載）。
           if (ev.file) generatedFiles.push({ name: ev.file.filename, mime: ev.file.mime,
                                               data_base64: ev.file.data_base64, kind: 'doc' })
+        } else if (ev.type === 'critic') {
+          thinking.text = ev.verdict === 'pass' ? '檢查通過，整理回覆中…' : '檢查未通過，重新產生中…'
         } else if (ev.type === 'final') {
+          dropThinking()
           items.value.push({ kind: 'agent', html: renderMarkdown(ev.content, sources), text: ev.content,
                              attachments: generatedFiles.slice(), time: new Date().toISOString() })
-        } else if (ev.type === 'critic') {
-          items.value.push({ kind: 'trace', skill: `critic:${ev.task_type}`, args: '',
-            result: (ev.verdict === 'pass' ? '✅ 通過' : '🔁 重試') + '：' + ev.reason })
         } else if (ev.type === 'memory_saved') {
           toast('🧠 已記住：' + ev.items.join('、'))
         } else if (ev.type === 'error') {
+          dropThinking()
           items.value.push({ kind: 'agent', html: `<span style="color:var(--danger)">錯誤：${esc(ev.message)}</span>` })
         }
         scrollDown()
       }
     }
+    dropThinking()   // 保險：串流意外結束又沒送 final/error 時，不留一句卡住的「思考中」
     await loadConversations()   // 更新標題/排序
   } catch (e) {
+    dropThinking()
     items.value.push({ kind: 'agent', html: `<span style="color:var(--danger)">連線失敗：${esc(e.message)}</span>` })
   } finally {
     sending.value = false
@@ -359,10 +369,8 @@ async function copy(text, i) {
                 </div>
               </div>
             </div>
-            <div v-else-if="it.kind === 'routing'" class="routing">🧭 {{ it.text }}</div>
-            <div v-else class="trace">
-              <div><span class="call">{{ it.skill }}</span><span class="args">({{ it.args }})</span></div>
-              <div class="result">{{ it.result }}</div>
+            <div v-else class="thinking">
+              <span class="thinking-dot"></span>{{ it.text }}
             </div>
           </template>
         </div>
@@ -424,7 +432,9 @@ async function copy(text, i) {
 .model-sel { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-family: inherit; font-size: 13px; max-width: 170px; }
 .conv-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 2px; }
 .badge { font-size: 10.5px; color: var(--muted); font-family: var(--font-mono); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
-.routing { align-self: center; font-size: 11.5px; color: var(--muted); font-family: var(--font-mono); background: var(--surface-2); border: 1px solid var(--border); border-radius: 20px; padding: 3px 12px; }
+.thinking { align-self: flex-start; margin-left: 43px; display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); font-family: var(--font-mono); }
+.thinking-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--skill); animation: thinking-pulse 1.2s ease-in-out infinite; }
+@keyframes thinking-pulse { 0%, 100% { opacity: .3; transform: scale(.85); } 50% { opacity: 1; transform: scale(1); } }
 .modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); width: 380px; max-width: 92vw; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; z-index: 50; padding: 22px; }
 .modal h3 { font-family: var(--font-display); font-size: 16px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
 .modal .close { background: none; border: none; color: var(--muted); font-size: 20px; }
@@ -486,12 +496,6 @@ main { display: flex; flex-direction: column; overflow: hidden; }
 .bubble th, .bubble td { border: 1px solid var(--border); padding: 5px 10px; }
 .bubble hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 
-.trace { font-family: var(--font-mono); font-size: 12.5px; background: color-mix(in srgb, var(--skill) 7%, var(--surface)); border: 1px solid color-mix(in srgb, var(--skill) 28%, var(--border)); border-left: 2.5px solid var(--skill); border-radius: 8px; padding: 9px 13px; max-width: 780px; align-self: flex-start; margin-left: 43px; overflow-wrap: anywhere; word-break: break-word; }
-.trace .call { color: var(--skill); }
-.trace .args { color: var(--muted); overflow-wrap: anywhere; word-break: break-word; }
-.trace .result { color: var(--text); margin-top: 5px; padding-top: 5px; border-top: 1px dashed var(--border); overflow-wrap: anywhere; word-break: break-word; }
-.trace .result::before { content: "→ "; color: var(--success); }
-
 .composer { border-top: 1px solid var(--border); padding: 16px 26px 20px; }
 .atts { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .att { display: flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-size: 12.5px; }
@@ -516,5 +520,5 @@ textarea::placeholder { color: var(--muted); }
 
 .toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--surface-2); border: 1px solid color-mix(in srgb, var(--success) 40%, var(--border)); color: var(--text); font-size: 13px; padding: 10px 16px; border-radius: 10px; z-index: 60; }
 
-@media (max-width: 720px) { .body { grid-template-columns: 1fr; } aside { display: none; } .trace { margin-left: 0; } }
+@media (max-width: 720px) { .body { grid-template-columns: 1fr; } aside { display: none; } .thinking { margin-left: 0; } }
 </style>
