@@ -14,6 +14,7 @@ python-dotenv==1.2.2
 
 # 呼叫獨立的 mcp_server（tool-calling 已搬到那邊，這裡是 MCP client）
 mcp==2.0.0
+httpx2==2.9.1   # mcp streamable_http 底層用的 client（有 .sse()），mcp_client.py 直接引用，明確釘版本
 
 # 間接相依，釘版本
 langchain-core==1.4.8

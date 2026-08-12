@@ -128,13 +128,17 @@ def _format(nodes: list):
 
 def _search(query: str, emp_id: str | None):
     """命中料號格式或 CAR/LL/MRB/報廢 等關鍵字時，直接用擴大過的 topk 查詢；
-    若查詢結果剛好撈滿 topk（代表可能還有更多筆被截斷），且尚未到 RAG_TOPK_MAX，
+    若這類查詢結果剛好撈滿 topk（代表可能還有更多筆被截斷），且尚未到 RAG_TOPK_MAX，
     會自動再用 RAG_TOPK_MAX 查一次以擴大搜尋範圍。
+
+    一般語意問題不吃「撈滿就升級」這條：rerank 幾乎必然把 topk 填滿，撈滿不代表
+    被截斷，只是正常結果——直接升到 MAX 只會把不相關的段落也塞進 context。
     """
-    topk = RAG_TOPK_EXPANDED if _needs_expanded_search(query) else RAG_TOPK
+    expanded = _needs_expanded_search(query)
+    topk = RAG_TOPK_EXPANDED if expanded else RAG_TOPK
     try:
         nodes = _query_rag(query, topk, emp_id)
-        if len(nodes) >= topk and topk < RAG_TOPK_MAX:
+        if expanded and len(nodes) >= topk and topk < RAG_TOPK_MAX:
             nodes = _query_rag(query, RAG_TOPK_MAX, emp_id)
     except Exception as e:  # noqa: BLE001
         return f"知識庫檢索失敗：{e}", []

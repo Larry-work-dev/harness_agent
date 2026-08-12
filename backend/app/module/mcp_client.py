@@ -12,7 +12,7 @@ import asyncio
 import os
 from functools import lru_cache
 
-import httpx
+import httpx2
 from langchain_core.tools import StructuredTool
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -44,7 +44,9 @@ async def _list_tools_async() -> list[dict]:
 
 async def _call_tool_async(name: str, args: dict, emp_id: str | None):
     headers = {"X-Emp-Id": emp_id} if emp_id else {}
-    http_client = httpx.AsyncClient(headers=headers)
+    # streamable_http_client 內部走 httpx2.AsyncClient（有 .sse()），不能傳舊版 httpx 的
+    # AsyncClient 進去，型別不合會在 GET stream 階段炸 AttributeError。
+    http_client = httpx2.AsyncClient(headers=headers)
     async with streamable_http_client(MCP_SERVER_URL, http_client=http_client) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
