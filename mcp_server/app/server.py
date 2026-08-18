@@ -11,7 +11,9 @@ create_excel/create_word/create_ppt 都是用結構化參數（表格資料、�
 圖表定義、段落/投影片內容）驅動 openpyxl/python-docx/python-pptx，不是讓
 模型自己寫程式碼執行，所以不需要額外的 code sandbox。
 """
+import asyncio
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 
@@ -19,10 +21,25 @@ load_dotenv()
 
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
+from app.module import dynamic_skills  # noqa: E402
 from app.tools import (calculator, create_excel, create_ppt, create_word,  # noqa: E402
                        knowledge_search, read_url, text_stats, web_search)
 
-server = MCPServer("harness-tools", version="1.0.0")
+
+@asynccontextmanager
+async def _lifespan(mcp_server: MCPServer):
+    # 開機先跟 db_api 拉一次使用者自建的 http/code 技能掛上；ToolManager 是純
+    # 記憶體 dict，重啟就清空，db_api 才是唯一真相來源。之後每 60 秒重新整理
+    # 一次，當 backend 推播（新增/刪除技能後）失敗時的安全網。
+    dynamic_skills.hydrate(mcp_server)
+    reconcile_task = asyncio.create_task(dynamic_skills.reconcile_loop(mcp_server))
+    try:
+        yield {}
+    finally:
+        reconcile_task.cancel()
+
+
+server = MCPServer("harness-tools", version="1.0.0", lifespan=_lifespan)
 
 calculator.register(server)
 text_stats.register(server)
@@ -32,6 +49,7 @@ create_word.register(server)
 create_ppt.register(server)
 web_search.register(server)
 read_url.register(server)
+dynamic_skills.register_admin_routes(server)
 
 
 def main() -> None:

@@ -3,7 +3,11 @@
 判斷點（順序即優先級）：
   1. 敏感資料（規則式，最優先）→ 強制走 local profile，連手動覆寫都蓋不過，
      而且直接跳過意圖路由（絕不把疑似敏感內容送去做 LLM 分類）。
-  2. 意圖路由（LLM，對齊公司現有入口的 7 類）→ orchestrator.classify_intent()：
+  2. 使用者自建 prompt 技能關鍵字（規則式）→ 命中就直接用該技能的 system prompt
+     模板回答，不進 LLM 意圖分類。這裡刻意不接進 classify_intent 共用的 7 類
+     意圖分類——那個分類 prompt 是全公司共用的固定入口，塞使用者各自的關鍵字
+     進去只會讓它越餵越肥、還可能互相污染，用規則式關鍵字比對加一層前置判斷更乾淨。
+  3. 意圖路由（LLM，對齊公司現有入口的 7 類）→ orchestrator.classify_intent()：
        - leave / sign / contact / system_dev → 觸發對應 workflow（既定流程，不經生成）
        - translate → auto_route，強制 task_type「文件翻譯」
        - summary   → auto_route，強制 task_type「語意分析」
@@ -14,6 +18,7 @@
 """
 import re
 
+from app.module import db_client as db
 from app.module.logs import get as get_logger
 from app.services import orchestrator
 
@@ -48,8 +53,28 @@ def detect_sensitive(text: str) -> bool:
     return any(re.search(p, text) for p in _SENSITIVE_PATTERNS)
 
 
-def route(text: str) -> dict:
-    """前門決策：敏感（規則）優先，其餘交給 LLM 意圖路由。
+def _match_prompt_skill(text: str, user_id: int | None):
+    """使用者自建 prompt 技能：命中任一 trigger_keywords 就回傳這個技能，沒有就回 None。
+    DB 查詢失敗（db_api 掛了之類）絕不能讓一般對話跟著壞掉——fail-open，當作沒命中。"""
+    if user_id is None:
+        return None
+    try:
+        skills = db.list_skills(user_id, kind="prompt")
+    except Exception as e:  # noqa: BLE001
+        log.warning("查詢使用者 prompt 技能失敗(user_id=%s): %s，略過關鍵字比對", user_id, e)
+        return None
+    text_l = text.lower()
+    for skill in skills:
+        if not skill.get("enabled", True):
+            continue
+        keywords = (skill.get("spec") or {}).get("trigger_keywords") or []
+        if any(kw.lower() in text_l for kw in keywords if kw):
+            return skill
+    return None
+
+
+def route(text: str, user_id: int | None = None) -> dict:
+    """前門決策：敏感（規則）優先 → 使用者自建 prompt 技能關鍵字 → LLM 意圖路由。
 
     回傳的 decision 一律帶 intent / keywords（keywords 供 workflow 或下游使用，
     例如 contact 意圖抓到的員工編號/姓名）。
@@ -58,6 +83,12 @@ def route(text: str) -> dict:
         log.info("route → 敏感資料，限本地模型（跳過意圖路由）")
         return {"mode": "generate", "profile": "local", "reason": "含敏感資料，限本地模型",
                 "intent": "sensitive", "keywords": []}
+
+    skill = _match_prompt_skill(text, user_id)
+    if skill:
+        log.info("route → user_skill_prompt:%s（使用者自建技能）", skill["id"])
+        return {"mode": "user_skill_prompt", "skill_id": skill["id"], "skill_name": skill["name"],
+                "intent": "user_skill_prompt", "keywords": [], "reason": f"使用者自訂技能：{skill['name']}"}
 
     result = orchestrator.classify_intent(text)
     intent, keywords = result["intent"], result["keywords"]

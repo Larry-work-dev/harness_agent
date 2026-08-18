@@ -23,6 +23,7 @@ from app.module.logs import get as get_logger
 from app.module import ocr
 from app.module.workflows import get_workflow
 from app.services import memory, orchestrator, routing
+from app.services.user_skills import run_prompt_skill
 
 router = APIRouter()
 log = get_logger("chat")
@@ -111,8 +112,8 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         decision = {"mode": "generate", "profile": None, "spec": cfg.model_spec(mid),
                     "reason": "含敏感資料，限本地模型", "label": mid}
     else:
-        d = routing.route(req.message)
-        decision = {**d, "spec": None, "label": d.get("workflow") or "路由中"}
+        d = routing.route(req.message, user_id=user["id"])
+        decision = {**d, "spec": None, "label": d.get("workflow") or d.get("skill_name") or "路由中"}
 
     log.info("decision: user=%s conv_mode=%s imgs=%d docs=%d → mode=%s label=%s (%s)",
              user["id"], conv.get("mode"), len(images), len(docs),
@@ -171,7 +172,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
         memory_text = memory.recall(embedder, user["id"], req.message)
         hist = ([{"role": "system", "content": "以下是先前對話的摘要：\n" + summary}] if summary else []) + recent
         model = create_model(profile=decision.get("profile"), spec=decision.get("spec"), temperature=0.0)
-        harness = Harness(model, emp_id=user.get("emp_id"))
+        harness = Harness(model, emp_id=user.get("emp_id"), user_id=user["id"])
         final_content = None; collected = {}; generated_files = []
         for ev in harness.run(req.message, history=hist, memory_context=memory_text, extra_system=ctx):
             if ev["type"] == "skill_result":
@@ -225,7 +226,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
             is_first = (i == 0)
             primary, fallback = cfg.primary_model(sub["task_type"])
             harness = Harness(create_model(spec=cfg.model_spec(primary), temperature=0.0),
-                               emp_id=user.get("emp_id"))
+                               emp_id=user.get("emp_id"), user_id=user["id"])
 
             # 檢索 safety net：只在沒有 tool-calling 能力時才做，且只做一次、不隨 retry 重做
             retrieved, retrieved_sources = "", []
@@ -263,7 +264,7 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                         fallback_attempts += 1
                         try:
                             harness = Harness(create_model(spec=cfg.model_spec(fallback), temperature=0.0),
-                                               emp_id=user.get("emp_id"))
+                                               emp_id=user.get("emp_id"), user_id=user["id"])
                             continue
                         except Exception:
                             pass
@@ -377,6 +378,14 @@ def chat(req: ChatRequest, user=Depends(current_user)):
                 log.info("→ 走 workflow: %s（keywords=%s）", decision["workflow"], decision.get("keywords"))
                 wf = get_workflow(decision["workflow"])
                 result = wf.run(req.message, decision.get("keywords") or []) if wf else "找不到對應的流程。"
+                db.add_message(req.conversation_id, "assistant", result)
+                yield sse({"type": "final", "content": result})
+                yield sse({"type": "done"}); return
+
+            if mode == "user_skill_prompt":
+                log.info("→ 走使用者自訂技能:%s", decision["skill_id"])
+                skill = db.get_skill(decision["skill_id"], user["id"])
+                result = run_prompt_skill(skill, req.message) if skill else "找不到對應的技能。"
                 db.add_message(req.conversation_id, "assistant", result)
                 yield sse({"type": "final", "content": result})
                 yield sse({"type": "done"}); return

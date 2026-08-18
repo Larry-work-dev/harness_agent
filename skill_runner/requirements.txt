@@ -1,0 +1,4 @@
+# 隔離執行使用者 code 技能的沙盒服務——刻意不裝任何跟外部 API 溝通用的套件
+# （httpx 等），這個服務本身也不需要主動連網路，skill-net 是 internal:true。
+fastapi==0.139.0
+uvicorn[standard]==0.50.2

@@ -41,11 +41,12 @@ class State(TypedDict):
 
 
 class Harness:
-    def __init__(self, model: Any, max_steps: int = 8, emp_id: str | None = None):
+    def __init__(self, model: Any, max_steps: int = 8, emp_id: str | None = None, user_id: int | None = None):
         # emp_id 綁進每次呼叫 mcp_server 的 HTTP header（不是 tool 參數）：
         # 確保「用誰的權限查」只能由後端依登入者身分決定，模型看不到、也改不動
         # （見 mcp_client.build_tools 與 mcp_server/app/tools/knowledge_search.py）。
-        self.tools = mcp_client.build_tools(emp_id)
+        # user_id 用來過濾使用者自建技能——只綁自己的，別人的技能連 schema 都不會出現。
+        self.tools = mcp_client.build_tools(emp_id, user_id)
         self.max_steps = max_steps
         self.use_tools = tools_enabled()
         # 只有 gateway 支援 tool calling 時才綁 tools，否則純文字生成

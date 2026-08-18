@@ -11,3 +11,11 @@ def get_permission_by_emp_id(emp_id: str):
     resp = _client.get("/permissions/by-emp-id", params={"emp_id": emp_id})
     resp.raise_for_status()
     return resp.json()
+
+
+def list_executable_skills(kind: str | None = None) -> list:
+    """不分使用者，撈全部啟用中的技能——給 dynamic_skills 掛動態工具用。"""
+    params = {"kind": kind} if kind else {}
+    resp = _client.get("/skills/executable", params=params)
+    resp.raise_for_status()
+    return resp.json()

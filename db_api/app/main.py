@@ -2,8 +2,8 @@
 from fastapi import FastAPI
 
 from app.router import (conversations, doc_chunks, memories, messages,
-                        model_profiles, permissions, users, workspaces)
+                        model_profiles, permissions, skills, users, workspaces)
 
 app = FastAPI(title="db_api")
-for m in (users, workspaces, conversations, messages, memories, model_profiles, doc_chunks, permissions):
+for m in (users, workspaces, conversations, messages, memories, model_profiles, doc_chunks, permissions, skills):
     app.include_router(m.router)

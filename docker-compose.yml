@@ -15,9 +15,26 @@ services:
     container_name: harness-mcp_server
     build: ./mcp_server
     env_file: ./mcp_server/.env         # RAG 位址等設定（tool-calling 從 backend 搬過來的）
-    depends_on: [db_api]
-    networks: [harness-net]
+    depends_on: [db_api, skill_runner]
+    # 雙掛：harness-net 連 db_api/backend，skill-net 連 skill_runner（code 技能沙盒）。
+    # skill_runner 本身只掛 skill-net，連不到 harness-net——這是刻意的隔離，不是疏漏。
+    networks: [harness-net, skill-net]
     # 內部服務，只有 backend 會連；不需對外開埠，要除錯可加 ports: ["9200:9200"]
+
+  skill_runner:
+    container_name: harness-skill_runner
+    build: ./skill_runner
+    env_file: ./skill_runner/.env
+    networks: [skill-net]              # 不掛 harness-net：連不到 db_api/backend/外部網路
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    # 只有 mcp_server 會連，不需對外開埠；殘留風險見 skill_runner/app/runner.py 開頭說明
 
   backend:
     container_name: harness-backend
@@ -42,3 +59,5 @@ networks:
   harness-net:
     external: true                     # 由 db 那包建立
     name: harness-net
+  skill-net:
+    internal: true                     # 沒有出網、也連不到 harness-net 上的任何服務——code 技能只能算東西，不能連網路

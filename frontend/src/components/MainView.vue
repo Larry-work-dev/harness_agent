@@ -2,6 +2,7 @@
 import { ref, reactive, nextTick, onMounted } from 'vue'
 import { API, token, setToken, api, esc, renderCitations, renderMarkdown, sourceListHTML, uploadFiles, downloadAttachment } from '../api.js'
 import MemoryPanel from './MemoryPanel.vue'
+import SkillsPanel from './SkillsPanel.vue'
 
 const workspaces = ref([])
 const workspaceId = ref(null)
@@ -14,6 +15,7 @@ const attachments = ref([])   // 已上傳待送出的附件
 const uploading = ref(false)
 const fileInput = ref(null)
 const showMemory = ref(false)
+const showSkills = ref(false)
 const toastMsg = ref('')
 const streamEl = ref(null)
 let toastTimer
@@ -310,6 +312,7 @@ async function copy(text, i) {
         <button v-if="convMode === 'manual'" class="icon" title="新增自訂模型" @click="showAddModel = true">＋模型</button>
       </div>
       <button class="icon" @click="showMemory = true">🧠 記憶</button>
+      <button class="icon" @click="showSkills = true">🧩 技能</button>
       <button class="icon" @click="logout">登出</button>
     </div>
 
@@ -398,6 +401,7 @@ async function copy(text, i) {
     </div>
 
     <MemoryPanel v-if="showMemory" @close="showMemory = false" />
+    <SkillsPanel v-if="showSkills" @close="showSkills = false" />
 
     <template v-if="showAddModel">
       <div class="overlay" @click="showAddModel = false"></div>

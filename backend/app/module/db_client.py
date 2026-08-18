@@ -149,5 +149,31 @@ def delete_model_profile(profile_id, user_id):
     _json(_client.delete(f"/model-profiles/{profile_id}", params={"user_id": user_id}))
 
 
+# ---- 使用者自建技能 -----------------------------------------------------
+def create_skill(user_id, kind, name, description, spec) -> dict:
+    return _json(_client.post("/skills", json={
+        "user_id": user_id, "kind": kind, "name": name, "description": description, "spec": spec}))
+
+def list_skills(user_id, kind=None) -> list:
+    params = {"user_id": user_id}
+    if kind:
+        params["kind"] = kind
+    return _json(_client.get("/skills", params=params))
+
+def list_executable_skills(kind=None) -> list:
+    """不分使用者，給 mcp_server 掛動態工具用。"""
+    params = {"kind": kind} if kind else {}
+    return _json(_client.get("/skills/executable", params=params))
+
+def get_skill(skill_id, user_id):
+    resp = _client.get(f"/skills/{skill_id}", params={"user_id": user_id})
+    if resp.status_code == 404:
+        return None
+    return _json(resp)
+
+def delete_skill(skill_id, user_id):
+    _json(_client.delete(f"/skills/{skill_id}", params={"user_id": user_id}))
+
+
 def set_conversation_mode(conversation_id, mode, model="auto"):
     _json(_client.post(f"/conversations/{conversation_id}/mode", json={"mode": mode, "model": model}))
