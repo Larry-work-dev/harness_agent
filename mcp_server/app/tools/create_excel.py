@@ -15,7 +15,9 @@ schema 裡，模型才填得對。
 """
 import base64
 import io
+import os
 
+import httpx
 from mcp_types import CallToolResult, TextContent
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, LineChart, PieChart, Reference
@@ -23,6 +25,35 @@ from openpyxl.styles import Font
 from pydantic import BaseModel, Field
 
 _CHART_TYPES = {"bar": BarChart, "line": LineChart, "pie": PieChart}
+
+# 上傳/下載都是同一個服務（devops.avc.co:18082），跟 personal.js 的
+# fileBase 是同一個位址；上傳走「個人」端點，依工號存進
+# workspace/<工號>/upload_file/，跟使用者自己上傳附件共用同一套機制。
+DEVOPS_FILE_BASE = os.environ.get("DEVOPS_FILE_BASE", "https://devops.avc.co:18082")
+DEVOPS_FILE_VERIFY_SSL = os.environ.get("DEVOPS_FILE_VERIFY_SSL", "false").lower() != "false"
+
+
+def upload_to_workspace(filename: str, data: bytes, mime: str, workid: str) -> str:
+    """把產生好的檔案上傳到該工號的 workspace，回傳可以直接用的下載連結。
+
+    workspace_path 回來的是 openclaw 自己看到的路徑（/root/.openclaw/workspace/...），
+    但下載服務認的是它自己容器內的路徑（/app/openclaw/workspace/...）——同一份儲存、
+    不同容器掛的路徑前綴不同，所以下載連結要用後者，不能直接照抄 workspace_path。
+    這裡的字串替換已經拿真實環境測過一輪（上傳→下載）確認可行，不是猜的。
+    """
+    resp = httpx.post(
+        f"{DEVOPS_FILE_BASE}/files/upload/personal",
+        params={"workid": workid},
+        files={"file": (filename, data, mime)},
+        verify=DEVOPS_FILE_VERIFY_SSL,
+        timeout=30,
+    )
+    resp.raise_for_status()
+    workspace_path = resp.json()["workspace_path"]
+    download_dir = workspace_path.replace("/root/.openclaw/workspace", "/app/openclaw/workspace", 1)
+    download_dir = download_dir.rsplit("/", 1)[0]
+    from urllib.parse import quote
+    return f"{DEVOPS_FILE_BASE}/download?filename={quote(filename)}&download_dir={quote(download_dir)}"
 
 
 class ChartSpec(BaseModel):
@@ -96,4 +127,35 @@ def register(server) -> None:
                 "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "data_base64": base64.b64encode(data).decode(),
             },
+        )
+
+    @server.tool(
+        name="create_excel_plain",
+        description="產生 Excel（.xlsx）檔案並存進使用者自己的 workspace，回傳可直接下載的連結。"
+                    "支援多工作表、公式（儲存格內容以 = 開頭）、基本圖表（長條/折線/圓餅）與欄寬/粗體樣式。"
+                    "何時使用：使用者要求把資料整理成 Excel、報表、清單、對照表。"
+                    "workid 必填：目前對話代表的員工工號，決定檔案存進哪個人的 workspace。",
+    )
+    def create_excel_plain(filename: str, sheets: list[SheetSpec], workid: str) -> CallToolResult:
+        """給 openclaw 這類不支援 content_and_artifact 分工的 MCP client 用（跟
+        knowledge_search_plain 同樣的理由——openclaw 只要偵測到 structured_content
+        存在，就會整個蓋掉 content，模型看到的只剩一段 base64，看不到真正有用的
+        下載連結）。這裡完全不回 structured_content，真正把檔案存到磁碟（原本的
+        create_excel 只存進記憶體、從沒寫過檔案，回傳的下載連結是模型自己編的、
+        一定打不開），下載連結由實際上傳結果組出來，不是猜的。
+        """
+        name = filename if filename.endswith(".xlsx") else filename + ".xlsx"
+        data = _build(sheets)
+        try:
+            url = upload_to_workspace(
+                name, data,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                workid,
+            )
+        except Exception as e:  # noqa: BLE001
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"Excel 已產生但上傳失敗，無法提供下載連結：{e}")],
+            )
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"已產生 Excel 檔案：{name}\n下載連結：{url}")],
         )

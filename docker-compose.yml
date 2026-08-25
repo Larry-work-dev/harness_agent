@@ -16,10 +16,16 @@ services:
     build: ./mcp_server
     env_file: ./mcp_server/.env         # RAG 位址等設定（tool-calling 從 backend 搬過來的）
     depends_on: [db_api, skill_runner]
-    # 雙掛：harness-net 連 db_api/backend，skill-net 連 skill_runner（code 技能沙盒）。
+    # 三掛：harness-net 連 db_api/backend，skill-net 連 skill_runner（code 技能沙盒），
+    # kiki-chat-openclaw-network 讓 kiki-chat-openclaw 那邊的兩個 openclaw 節點連得到
+    # 這裡當 MCP tool server（見該 repo 的 docker-compose.yml，網路在那邊建立）。
     # skill_runner 本身只掛 skill-net，連不到 harness-net——這是刻意的隔離，不是疏漏。
-    networks: [harness-net, skill-net]
+    networks: [harness-net, skill-net, kiki-chat-openclaw-network]
     # 內部服務，只有 backend 會連；不需對外開埠，要除錯可加 ports: ["9200:9200"]
+    extra_hosts:
+      # deveip3 這台在這個環境的網路裡沒有 DNS 紀錄，KB_BACKEND=azure 要打
+      # AskQuestionStream 得靠這裡手動指到內網 IP 才能解析。
+      - "deveip3.avc.co:192.168.31.225"
 
   skill_runner:
     container_name: harness-skill_runner
@@ -61,3 +67,6 @@ networks:
     name: harness-net
   skill-net:
     internal: true                     # 沒有出網、也連不到 harness-net 上的任何服務——code 技能只能算東西，不能連網路
+  kiki-chat-openclaw-network:
+    external: true                     # 由 kiki-chat-openclaw 那包建立
+    name: kiki-chat-openclaw-network
