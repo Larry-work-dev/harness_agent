@@ -12,3 +12,7 @@ python-pptx==1.0.2
 # 網路搜尋（web_search / read_url）
 ddgs==9.14.4              # DuckDuckGo 搜尋（免 API key）
 beautifulsoup4==4.15.0   # read_url 把 HTML 抽成純文字（用 python-docx 已帶的 lxml 當 parser）
+
+# 結構化資料庫查詢（structured_db tool：固定查詢 + text-to-SQL）
+SQLAlchemy==2.0.36        # 跟 db_api 用同一版
+pymssql==2.3.2            # 連 MSSQL；純 Python/FreeTDS，不用裝 Microsoft ODBC driver

@@ -23,7 +23,8 @@ from mcp.server.mcpserver import MCPServer  # noqa: E402
 
 from app.module import dynamic_skills  # noqa: E402
 from app.tools import (calculator, create_excel, create_ppt, create_word,  # noqa: E402
-                       knowledge_search, read_url, text_stats, web_search)
+                       knowledge_search, read_url, structured_db, text_stats,
+                       web_search)
 
 
 @asynccontextmanager
@@ -49,6 +50,7 @@ create_word.register(server)
 create_ppt.register(server)
 web_search.register(server)
 read_url.register(server)
+structured_db.register(server)
 dynamic_skills.register_admin_routes(server)
 
 
