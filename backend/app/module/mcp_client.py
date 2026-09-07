@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from functools import lru_cache
+import time
 
 import httpx
 from langchain_core.tools import StructuredTool
@@ -25,6 +25,14 @@ log = get_logger("mcp_client")
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://mcp_server:9200/mcp")
 # custom_route 掛的管理端點，走一般 HTTP（不是 MCP 的 streamable-http 協議），base 拿掉 /mcp。
 MCP_SERVER_BASE_URL = os.environ.get("MCP_SERVER_BASE_URL", MCP_SERVER_URL.rsplit("/mcp", 1)[0])
+
+# 工具目錄快取的存活時間。預設 60 秒是刻意跟 mcp_server 那邊的
+# dynamic_skills.reconcile_loop 對齊——那邊每 60 秒跟 db_api 對一次自建技能，
+# 這裡每 60 秒重抓一次目錄，兩邊「最慢多久看得到新東西」就都是一分鐘。
+TOOL_CACHE_TTL_S = int(os.environ.get("TOOL_CACHE_TTL_S", "60"))
+# 抓失敗後的重試間隔，比 TTL 短很多：mcp_server 重啟後很快就補得回來，
+# 但又不會每個請求都去撞一次連不上的服務。
+_TOOL_CACHE_RETRY_S = int(os.environ.get("TOOL_CACHE_RETRY_S", "10"))
 
 # 這些 tool 的 structured_content 帶了「參考資料」（sources 陣列），要用
 # content_and_artifact 模式，harness 才抽得出 sources 給前端顯示。
@@ -69,22 +77,52 @@ async def _call_tool_async(name: str, args: dict, emp_id: str | None, user_id: i
             return text, (result.structured_content or {})
 
 
-@lru_cache(maxsize=1)
+_specs_cache: tuple[dict, ...] | None = None
+_specs_next_fetch_at: float = 0.0
+
+
 def _tool_specs() -> tuple[dict, ...]:
-    """整個工具目錄（內建工具 + 所有使用者的自建技能）只跟 mcp_server 要一次、之後重複用。
+    """整個工具目錄（內建工具 + 所有使用者的自建技能），跟 mcp_server 要一次後
+    快取 TOOL_CACHE_TTL_S 秒。
     使用者自建技能的可見範圍在 build_tools() 依 meta.owner_user_id 過濾，這裡不分使用者。
-    技能新增/刪除後，backend/app/router/skills.py 會呼叫 invalidate_tool_cache() 清掉這份快取。"""
+    技能新增/刪除後 backend/app/router/skills.py 會呼叫 invalidate_tool_cache()，
+    那條路徑仍然是「立刻生效」，TTL 只是它漏接時的安全網。
+
+    ⚠️ 這裡以前是 @lru_cache(maxsize=1)——等於永久快取，只有 invalidate_tool_cache()
+    清得掉，而那個只在「使用者自建技能」變動時才會被呼叫。結果是 mcp_server 重建、
+    加了新的「內建」tool 之後，長跑的 backend process 會一直抱著舊目錄，模型看不到
+    新 tool；而且完全沒有錯誤訊息，它只會安靜地改挑一個次好的 tool，很難察覺。
+    加 TTL 就是為了讓這種「目錄變了但沒人通知 backend」的情況最多一分鐘自己收斂。
+    """
+    global _specs_cache, _specs_next_fetch_at
+    now = time.monotonic()
+    if now < _specs_next_fetch_at:
+        return _specs_cache or ()
     try:
-        return tuple(asyncio.run(_list_tools_async()))
+        specs = tuple(asyncio.run(_list_tools_async()))
     except Exception as e:  # noqa: BLE001
+        _specs_next_fetch_at = now + _TOOL_CACHE_RETRY_S
+        if _specs_cache:
+            # 沿用上一份還在手上的目錄：一次網路抖動不該讓整輪對話沒有 tool 可用。
+            log.warning("連線 mcp_server（%s）取得 tool 清單失敗(%s)，暫時沿用前一份目錄（%d 個 tool）",
+                        MCP_SERVER_URL, e, len(_specs_cache))
+            return _specs_cache
         log.error("連線 mcp_server（%s）取得 tool 清單失敗(%s)，這輪對話將沒有任何 tool 可用",
                   MCP_SERVER_URL, e)
         return ()
+    if _specs_cache is not None and len(specs) != len(_specs_cache):
+        log.info("mcp_server tool 目錄有變動：%d → %d 個 tool", len(_specs_cache), len(specs))
+    _specs_cache = specs
+    _specs_next_fetch_at = now + TOOL_CACHE_TTL_S
+    return specs
 
 
 def invalidate_tool_cache() -> None:
-    """使用者新增/刪除自建技能後呼叫，讓下一輪對話立刻看到最新的工具目錄。"""
-    _tool_specs.cache_clear()
+    """使用者新增/刪除自建技能後呼叫，讓下一輪對話立刻看到最新的工具目錄
+    （不用等 TOOL_CACHE_TTL_S 到期）。"""
+    global _specs_cache, _specs_next_fetch_at
+    _specs_cache = None
+    _specs_next_fetch_at = 0.0
 
 
 def notify_skill_changed(skill_id: int) -> None:

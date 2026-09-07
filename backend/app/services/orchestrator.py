@@ -18,6 +18,7 @@ import re
 from app.config import create_model
 from app.module import agent_config as cfg
 from app.module import mcp_client
+from app.module.citations import CITATION_RE
 from app.module.logs import get as get_logger
 
 log = get_logger("orchestrator")
@@ -52,11 +53,9 @@ def retrieve(query: str, emp_id: str | None = None) -> tuple[str, list]:
     return mcp_client.call_knowledge_search(query, emp_id)
 
 
-# 引用標記是 RAG 服務 metadata 的 FileID（32 碼 hex 或含 dash 的 UUID），
-# 不是自己編號的序號——見 knowledge_search._format()。
-# 方括號內外加 \s* 是因為實測模型偶爾會多打空白（例如 "[ b04d50a0...]"），
-# 沒有這個容錯，來源會整批被判定「沒有引用」而濾光。
-_CITATION_RE = re.compile(r"\[\s*([0-9a-fA-F-]{8,40})\s*\]")
+# 引用標記的格式定義搬到 app/module/citations.py——harness 送出 final 事件前也要用
+# 同一份定義清掉假標記，格式只留一份，不要兩邊各寫一個正則然後慢慢走鐘。
+# 標記是 RAG 服務 metadata 的 FileID，不是自己編號的序號——見 knowledge_search._format()。
 
 
 def cited_sources(text: str, sources: list[dict]) -> list[dict]:
@@ -67,7 +66,7 @@ def cited_sources(text: str, sources: list[dict]) -> list[dict]:
     而且要用 FileID 對，不是位置序號——序號在筆數一多、或跨多個子任務/多次
     檢索時很容易對錯來源，FileID 直接對應回真正的檔案就不會有這個問題。
     """
-    used = {n for n in _CITATION_RE.findall(text or "")}
+    used = {n for n in CITATION_RE.findall(text or "")}
     return [s for s in sources if s.get("n") in used]
 
 

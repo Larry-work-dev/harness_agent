@@ -30,6 +30,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
 from app.module import mcp_client
+from app.module.citations import strip_bogus_citations
 
 
 def tools_enabled() -> bool:
@@ -66,7 +67,11 @@ class Harness:
             "請在每一個句子的結尾、句號之前，原樣照抄該段落開頭方括號內的 FileID"
             "（檢索結果每段最前面的 [FileID]，直接照抄、不要自己編號、不要省略字元、"
             "方括號內外都不要加空格）"
-            "標註該句依據的來源；沒有依據的句子則不標註。"
+            "標註該句依據的來源；沒有依據的句子則不標註。\n"
+            "這個引用規則只適用於「結果本身每段開頭就帶方括號代號」的檢索類工具。"
+            "如果工具回來的內容裡沒有那種代號（例如結構化資料庫查詢，回的是欄位與值），"
+            "就直接敘述查到的內容，整句不要加任何方括號標記——"
+            "不要拿欄位名、查詢結果或「查無資料」去湊一個 [] 出來，那不是來源代號。"
         )
 
     def _build(self):
@@ -132,7 +137,7 @@ class Harness:
                         for c in calls:
                             yield {"type": "skill_call", "skill": c["name"], "args": c["args"]}
                     elif msg.content:
-                        yield {"type": "final", "content": msg.content}
+                        yield {"type": "final", "content": strip_bogus_citations(msg.content)}
                 elif node == "tools":
                     for m in update["messages"]:
                         event = {"type": "skill_result", "skill": m.name, "result": m.content}
