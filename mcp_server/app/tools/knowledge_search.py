@@ -15,16 +15,22 @@ KB_BACKEND=local（預設）：走上面說的 RAG Local Service，回傳原始�
 KB_BACKEND=azure：改打公司 KBApi/AskQuestionStream（SSE），那支本身就是
 「檢索＋生成答案」一次做完，回傳的已經是完整答案，不是原始節點——所以這條
 路徑不會再套用 _format() 的引用範本，直接把它吐出來的文字當作 content。
+
+每次檢索都會另外寫一筆結構化紀錄到 KB_LOG_DIR（見 app/module/kb_log.py）：
+帶進來的 filter 參數（含 knowledge_search_plain 那條「模型自己填的」
+filter_criteria 原樣）＋完整結果，用來事後追查權限範圍對不對、撈到什麼。
 """
 import json
 import os
 import re
+import time
 
 import httpx
 from mcp.server.mcpserver.context import Context
 from mcp_types import CallToolResult, TextContent
 
 from app.module import db_client as db
+from app.module import kb_log
 from app.module.logs import get as get_logger
 
 log = get_logger("knowledge_search")
@@ -78,18 +84,24 @@ def _env_filter() -> list:
         return []
 
 
-def _resolve_filter(emp_id: str | None) -> list:
+def _resolve_filter(emp_id: str | None) -> tuple[list, str]:
+    """回傳（實際要用的 filter, 這份 filter 從哪來）。
+
+    第二個值只給 log 用（見 kb_log）——事後看紀錄時要能一眼分辨「這次查詢
+    真的套到使用者權限」還是「fail-open 退回環境變數了」，光看 filter 內容
+    分不出來（DB 權限剛好是空的、跟 DB 查失敗退回空環境變數，長得一樣）。
+    """
     if not emp_id:
-        return _env_filter()
+        return _env_filter(), "env:no_emp_id"
     try:
         perm = db.get_permission_by_emp_id(emp_id)
     except Exception as e:  # noqa: BLE001
         log.warning("查詢使用者權限失敗(emp_id=%s): %s，退回環境變數 RAG_FILTER", emp_id, e)
-        return _env_filter()
+        return _env_filter(), "env:db_error"
     if perm and perm.get("filter_criteria"):
-        return perm["filter_criteria"]
+        return perm["filter_criteria"], "db"
     log.info("emp_id=%s 沒有 DB 權限紀錄，退回環境變數 RAG_FILTER", emp_id)
-    return _env_filter()
+    return _env_filter(), "env:no_permission_row"
 
 
 def _query_rag(query: str, topk: int, filter_list: list):
@@ -204,7 +216,7 @@ def _format(nodes: list):
     return content, sources
 
 
-def _search(query: str, filter_list: list):
+def _search(query: str, filter_list: list, trace: dict | None = None):
     """命中料號格式或 CAR/LL/MRB/報廢 等關鍵字時，直接用擴大過的 topk 查詢；
     若這類查詢結果剛好撈滿 topk（代表可能還有更多筆被截斷），且尚未到 RAG_TOPK_MAX，
     會自動再用 RAG_TOPK_MAX 查一次以擴大搜尋範圍。
@@ -219,12 +231,21 @@ def _search(query: str, filter_list: list):
     kiki-chat-openclaw/backend 從 session history 撈出來直接轉發給前端
     （見 KB_SOURCE_PASSTHROUGH_ENABLED），不是給模型讀的——HTML 註解在
     markdown 轉譯後本來就不會顯示，模型抄不抄都不影響 backend 撈得到資料。
+
+    trace 是給 log 用的旁路：把「這次實際用了多大的 topk、有沒有走擴大搜尋、
+    撈到幾筆、有沒有出錯」填進去。錯誤在這裡本來就被吞成回給模型的文字
+    （檢索失敗不該讓整個 tool call 炸掉），不填 trace 的話 log 只會看到一句
+    「知識庫檢索失敗」而查不出原因。
     """
+    if trace is None:
+        trace = {}
     if KB_BACKEND == "azure":
         try:
             answer, sources = _query_azure(query, filter_list)
         except Exception as e:  # noqa: BLE001
+            trace["error"] = repr(e)
             return f"知識庫檢索失敗：{e}", []
+        trace["hit_count"] = len(sources)
         if not answer:
             return "知識庫中查無相關資料。", []
         if sources:
@@ -239,17 +260,58 @@ def _search(query: str, filter_list: list):
 
     expanded = _needs_expanded_search(query)
     topk = RAG_TOPK_EXPANDED if expanded else RAG_TOPK
+    trace["expanded"] = expanded
+    trace["topk"] = topk
     try:
         nodes = _query_rag(query, topk, filter_list)
         if expanded and len(nodes) >= topk and topk < RAG_TOPK_MAX:
+            trace["topk"] = RAG_TOPK_MAX
+            trace["retried_with_max_topk"] = True
             nodes = _query_rag(query, RAG_TOPK_MAX, filter_list)
     except Exception as e:  # noqa: BLE001
+        trace["error"] = repr(e)
         return f"知識庫檢索失敗：{e}", []
 
+    trace["hit_count"] = len(nodes)
+    # 分數只在原始節點上，_format() 之後就沒了；留著才看得出「撈到的東西
+    # 到底沾不沾邊」，是判斷 filter 帶對沒帶對的主要依據之一。
+    trace["scores"] = [node.get("score") for node in nodes]
     if not nodes:
         return "知識庫中查無相關資料。", []
 
     return _format(nodes)
+
+
+def _search_and_log(query: str, filter_list: list, **fields):
+    """_search 的外皮：跑完把「進來的 filter 參數＋完整結果」寫一筆到 log 檔。
+
+    fields 由呼叫端補上「這次是哪支 tool、filter 是誰給的」——兩支 tool 的
+    filter 來源天差地遠（一支是 header 的 emp_id 查 DB，一支是模型自己填），
+    log 裡分不出來的話這份紀錄就沒有意義。
+    """
+    trace: dict = {}
+    started = time.perf_counter()
+    record = {**fields, "kb_backend": KB_BACKEND, "query": query, "filter_used": filter_list}
+    try:
+        content, sources = _search(query, filter_list, trace)
+    except Exception as e:  # noqa: BLE001
+        # _search 已經把已知錯誤吞成錯誤字串了，這裡純粹是保險：真的漏出來的
+        # 例外也要留下紀錄，寫完原樣往上丟，不改變原本的行為。
+        record["elapsed_ms"] = round((time.perf_counter() - started) * 1000)
+        record["search"] = trace
+        record["error"] = repr(e)
+        kb_log.write(record)
+        raise
+    record["elapsed_ms"] = round((time.perf_counter() - started) * 1000)
+    record["search"] = trace
+    record["result"] = {
+        # content 是「模型當時實際讀到的整份文字」，完整留著才能事後重現
+        "content": content,
+        "sources": sources,
+        "source_count": len(sources),
+    }
+    kb_log.write(record)
+    return content, sources
 
 
 def register(server) -> None:
@@ -261,7 +323,15 @@ def register(server) -> None:
     def knowledge_search(query: str, ctx: Context) -> CallToolResult:
         """要檢索的問題或關鍵字（用自然語言即可）"""
         emp_id = (ctx.headers or {}).get("x-emp-id")
-        content, sources = _search(query, _resolve_filter(emp_id))
+        filter_list, filter_source = _resolve_filter(emp_id)
+        content, sources = _search_and_log(
+            query,
+            filter_list,
+            tool="knowledge_search",
+            emp_id=emp_id,
+            filter_from_model=None,  # 這條路的 filter 模型碰不到，是 header 的 emp_id 查出來的
+            filter_source=filter_source,
+        )
         # content 給模型讀；sources 走 structured_content，給 backend 組「參考資料」用
         # （對齊原本 in-process 版本的 content_and_artifact 設計）。
         return CallToolResult(
@@ -290,5 +360,13 @@ def register(server) -> None:
         # openclaw 只要偵測到 structured_content 存在，就會整個蓋掉 content，
         # 模型永遠看不到帶全文的那份——所以這裡完全不回 structured_content，
         # 逼它退回去用 content（sources 已經內嵌在文字裡的 [FileID] 標註了）。
-        content, _sources = _search(query, filter_criteria or _env_filter())
+        content, _sources = _search_and_log(
+            query,
+            filter_criteria or _env_filter(),
+            tool="knowledge_search_plain",
+            emp_id=None,
+            # 這才是這份 log 最主要的目的：模型自己填的 filter_criteria 原樣留存
+            filter_from_model=filter_criteria,
+            filter_source="model" if filter_criteria else "env:empty_filter_criteria",
+        )
         return CallToolResult(content=[TextContent(type="text", text=content)])
