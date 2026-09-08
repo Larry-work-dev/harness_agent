@@ -106,7 +106,11 @@ table: CAR_Report_Data（各 BU/客訴類別的處理天數分布統計表，欄
 
 table: PDP_PDPConsolidatedSummary_Report（PDP 產品開發專案彙總表，一個 ProjectCode 一筆，
   約 4.7 萬筆。地位類似 CAR 那邊的 CAR_VIEW_combined，但這張每個專案都有、不是抽樣視圖）
-  - ProjectCode (nvarchar): 專案代碼，唯一鍵，格式 PDPn-YYYYMM-NNNN，例如 PDP5-202409-0007
+  - ProjectCode (nvarchar): 專案代碼，唯一鍵。主要格式是 PDPn-YYYYMM-NNNN
+    （例如 PDP5-202409-0007，n 見過 2/3/5/T），部分帶 -NN 尾碼（PDP3-202112-0016-01，
+    約 1,952 筆）。⚠️ 另外還有一批舊格式：PDP-NNNNNNNN（約 4,910 筆）、TEMP-*、
+    以及 14B-*／18C-*／15B-*／18D-* 這類早期編碼。查詢時把使用者給的代碼原樣比對，
+    不要假設它一定符合 PDPn-YYYYMM-NNNN，也不要「修正」它的格式
   - ProjectName, ODMProjectName, ProductName (nvarchar): 專案名稱、ODM 專案名、產品名稱
   - ProductPartNo (nvarchar): 產品料號；OriginalPartNo 是沿用機種的原始料號
   - ProjectDivision, ProductionMU, ProjectPriority (nvarchar): 事業處、生產單位、優先度
@@ -129,16 +133,22 @@ table: PDP_PDPConsolidatedSummary_Report（PDP 產品開發專案彙總表，一
     ⚠️ 欄位名稱本身含空白、逗號和大於號，一定要用中括號包起來，否則語法錯誤
   用途：查某個 PDP 專案的狀態、負責人、客戶、DR 關卡進度、成本毛利
 
-table: PDP_RelatedDoc_Info（PDP 專案各驗證階段的文件檢核清單，一個專案多筆，約 3.9 萬筆）
-  - SourceDocID (nvarchar): 來源單號。值是 PDP 專案代碼時可 join
-    PDP_PDPConsolidatedSummary_Report.ProjectCode（約 94% 對得上，其餘是別的來源單號）
-  - GridType (varchar): 驗證階段，只有 EVT / DVT / PVT 三種值（EVT 佔約七成）
-  - CategoryDescription (nvarchar): 檢核項目名稱，例如 PFMEA、QualityControlPlan、
-    是否已有可用安規、生產文件一致性確認
-  - DocValue (varchar): 該項目的判定，只有中文的「需要」/「不需要」兩種值
-    （全表約七成是「不需要」，所以問「要準備哪些文件」通常要加 DocValue = '需要'）
-  - CategoryManagementID (nvarchar): 檢核項目本身的代碼，格式 CTM-YYYYMM-NNNNNN
-  用途：查某個 PDP 專案在 EVT/DVT/PVT 各階段要準備哪些文件
+table: PDP_RelatedDoc_Info（PDP 專案的「對應附件」清單，一個專案可對應多個附件，
+  約 3.9 萬筆。⚠️ 這張表就是回答「某個 PDP 有沒有附件／有哪些附件」的地方）
+  - SourceDocID (nvarchar): 來源單號，對應 PDP_PDPConsolidatedSummary_Report.ProjectCode。
+    ⚠️ 這張表也存了非 PDP 的來源單號（約 2,354 筆是純數字的單號，例如 202409070794），
+    要限定在真的 PDP 專案上就 join 主表，或加 SourceDocID LIKE 'PDP%'
+  - DocValue (varchar): ⚠️ 判斷有無附件就看這個欄位，只有「需要」/「不需要」兩種值。
+    DocValue = '需要' 表示該項目「有」對應附件；'不需要' 表示沒有。
+    所以「這個 PDP 有沒有附件」= 該 ProjectCode 有沒有 DocValue = '需要' 的列，
+    一定要加這個條件——不能只看有沒有列存在，全表約七成的列都是「不需要」。
+    全庫 47,605 個專案裡只有 2,778 個（約 5.8%）有附件，「查無附件」是常見答案，
+    不是查詢失敗。
+  - CategoryDescription (nvarchar): 該附件項目的名稱，例如 PFMEA、DFMEA、
+    QualityControlPlan、是否已有可用安規、設計/生產文件一致性確認
+  - GridType (varchar): 該附件屬於哪個驗證階段，只有 EVT / DVT / PVT 三種值（EVT 約七成）
+  - CategoryManagementID (nvarchar): 附件項目本身的代碼，格式 CTM-YYYYMM-NNNNNN
+  用途：查某個 PDP 專案有沒有附件、有哪些附件（單一專案最多見過 11 個）
 
 table: HCM_EmployeeData（員工主檔，約 25 萬筆）
   ⚠️ 這張表原本有 135 個欄位，大部分是個資。下面列出的是「唯一查得到」的欄位——
@@ -259,12 +269,14 @@ def register(server) -> None:
         description=(
             "依專案代碼查一個 PDP 產品開發專案的彙總資料：流程狀態、目前卡在哪一關、"
             "PM/PE/SALES/RD 負責人、客戶、DR1~DR3 關卡日期、成本與毛利。"
-            "專案代碼格式 PDPn-YYYYMM-NNNN，例如 PDP5-202409-0007——問題裡出現這種"
-            "格式的代碼時直接用這支，不用先查 knowledge_search。"
+            "專案代碼主要是 PDPn-YYYYMM-NNNN（例如 PDP5-202409-0007），也有帶 -NN 尾碼"
+            "（PDP3-202112-0016-01）和 PDP-NNNNNNNN、TEMP-*、14B-* 等舊格式——"
+            "問題裡出現 PDP 專案代碼時直接用這支，不用先查 knowledge_search，"
+            "代碼原樣傳進來、不要修正格式。"
         ),
     )
     def query_pdp_project(project_code: str) -> str:
-        """PDP 專案代碼，格式 PDPn-YYYYMM-NNNN（例如 PDP5-202409-0007）"""
+        """PDP 專案代碼，原樣照抄使用者給的值（例如 PDP5-202409-0007、PDP3-202112-0016-01）"""
         sql = (
             "SELECT ProjectCode, ProjectName, ODMProjectName, ProductPartNo, ProductName, "
             "ProjectDivision, ProjectPriority, StatusCodeName, CurrentTaskProName, "
@@ -280,20 +292,38 @@ def register(server) -> None:
     @server.tool(
         name="query_pdp_related_docs",
         description=(
-            "查一個 PDP 專案在 EVT / DVT / PVT 各驗證階段需要準備哪些文件（DFMEA、"
-            "PFMEA、QualityControlPlan、安規申請、設計/生產文件一致性確認等），"
-            "以及每一項是「需要」還是「不需要」。專案代碼格式 PDPn-YYYYMM-NNNN。"
+            "查一個 PDP 專案「有沒有對應附件、有哪些附件」（PFMEA、DFMEA、"
+            "QualityControlPlan、安規申請、設計/生產文件一致性確認等）。"
+            "一個專案可以對應多個附件。問「這個 PDP 有沒有附件」、「附件有哪些」"
+            "就用這支——回傳的第一行就是有幾個附件的結論，不用自己判斷。"
+            "專案代碼把使用者給的值原樣傳進來，不要修正格式。"
         ),
     )
     def query_pdp_related_docs(project_code: str) -> str:
-        """PDP 專案代碼，格式 PDPn-YYYYMM-NNNN（例如 PDP5-202409-0007）"""
+        """PDP 專案代碼，原樣照抄使用者給的值（例如 PDP5-202409-0007、PDP3-202112-0016-01）"""
+        # 「有沒有附件」看的是 DocValue = '需要'，不是「這個專案在表裡有沒有列」——
+        # 全表約七成的列是「不需要」，只看列數會把「明確標記為不需要」誤判成有附件。
+        # 不需要的列一樣回傳但排在後面，這樣「有哪些附件」跟「哪一項被標為不需要」
+        # 兩種問題都答得出來。
+        # ORDER BY 寫成 CASE 而不是直接靠 DocValue 排序：中文字的排序結果取決於
+        # collation，不直觀也不保證，明確寫「需要優先」才穩。
         sql = (
-            "SELECT GridType, CategoryDescription, DocValue, CategoryManagementID "
+            "SELECT DocValue, GridType, CategoryDescription, CategoryManagementID "
             "FROM PDP_RelatedDoc_Info WHERE SourceDocID = :project_code "
-            "ORDER BY GridType, CategoryDescription"
+            "ORDER BY CASE WHEN DocValue = N'需要' THEN 0 ELSE 1 END, "
+            "GridType, CategoryDescription"
         )
         columns, rows = db.run_readonly(sql, params={"project_code": project_code})
-        return _format_rows(columns, rows)
+        if not rows:
+            return f"{project_code}：沒有對應附件（這個專案在附件清單裡完全沒有資料）。"
+        attached = [r for r in rows if r.get("DocValue") == "需要"]
+        skipped = len(rows) - len(attached)
+        if not attached:
+            head = f"{project_code}：沒有對應附件（{skipped} 個項目全部標記為「不需要」）。"
+        else:
+            head = (f"{project_code}：有 {len(attached)} 個對應附件"
+                    f"（另有 {skipped} 個項目標記為「不需要」）。")
+        return f"{head}\n\n{_format_rows(columns, rows)}"
 
     @server.tool(
         name="query_employee",
