@@ -150,6 +150,44 @@ table: PDP_RelatedDoc_Info（PDP 專案的「對應附件」清單，一個專�
   - CategoryManagementID (nvarchar): 附件項目本身的代碼，格式 CTM-YYYYMM-NNNNNN
   用途：查某個 PDP 專案有沒有附件、有哪些附件（單一專案最多見過 11 個）
 
+table: AI_Library_KBMetadata（知識庫的「來源單」主檔，約 4.2 萬筆。表單被灌進知識庫時
+  每一筆對應一個 MetadataID，這張表就是「表單號碼 → MetadataID」的對照表；附件的
+  實體檔案在 AI_Library_KBFile，chunk 全文要用 get_kb_chunks 工具撈）
+  - MetadataID (nvarchar): 這一筆在知識庫的 ID，32 碼小寫 hex，FK 給 AI_Library_KBFile
+  - SourceID (nvarchar): ⚠️ 來源表單號碼，接得回前面 CAR／PDP 兩套單號，但有兩種形態：
+    · CAR：就是 CARID 原樣（一個 CARID 剛好一筆），例如 CAR3-202608-000293
+    · PDP：專案本身一筆（ProjectCode，例如 PDP5-202302-0057），另外「每個附件項目」
+      各一筆複合單號 = ProjectCode + '_' + GridType + '_' + CategoryManagementID，
+      例如 PDP5-202302-0057_EVT_CTM-202209-051001（後兩段對得回 PDP_RelatedDoc_Info）。
+      所以查一個 PDP 專案的檔案要同時抓 SourceID = 專案代碼 和
+      SourceID LIKE 專案代碼 + '_%'，只用等號會漏掉附件那幾筆（附件都在複合單號底下）
+  - SourceName (nvarchar): 來源系統，CAR（2.5 萬筆）/ PDM（= PDP，8,236 筆）/
+    ISODoc / LessonLearn / PERSONAL（個人上傳）
+  - SourceType (nvarchar): QUEUE / IMPORT / WEB / APP
+  - DocType (nvarchar): CAR / PDM / KM / DCC_AVCVN / QIM / USERUPLOAD
+  - Title (nvarchar): 這一筆的摘要標題，把表單重點串成一行
+    （例如「CARID：CAR3-202608-000293｜料號：…｜CAR類型：OQC｜…」）
+  - ReferenceURL (nvarchar): 回原系統看那張表單的連結
+  - TotalCount (int): 這一筆底下有幾個檔案
+  - StatusCode (nvarchar): RELEASE（正常）/ VOID（作廢）/ FAILED（處理失敗）/ PROCESSING
+  - CompCode, DepCode, EmpID (nvarchar): 這份文件的可看範圍（公司別／部門代碼清單／
+    員工代碼清單），'ALL' = 不限。CAR 全部是 ALL；PERSONAL 一律綁特定 EmpID
+  - AllowDirect, AllowDownload (nvarchar): 'Y'／'N'
+  - CreateStamp, UpdateStamp (datetime)
+  用途：把表單號碼換成 MetadataID、查這張單有沒有被灌進知識庫、狀態如何
+
+table: AI_Library_KBFile（知識庫的實體檔案清單，約 5.2 萬筆，一個 MetadataID 可多筆）
+  - FileID (nvarchar): 檔案 ID，32 碼小寫 hex；撈 chunk 全文要的就是這個
+  - MetadataID (nvarchar, FK -> AI_Library_KBMetadata.MetadataID)
+  - OriginalFileName (nvarchar): 原始檔名
+  - FileType (nvarchar): DATA（系統把表單內容轉出來的 .json，不是使用者上傳的檔）/
+    FILE（真正的附件，pdf/docx/xlsx）/ TEXT / URL
+  - StatusCode (nvarchar): ⚠️ 只有 INDEX_OK（41,124 筆）才真的進了搜尋索引、撈得到
+    chunk；VOID / CHUNK_NG / CHUNK_UNSUPPORTED / UPLOAD_NG 這些撈了都是空的
+  - FileSize (bigint): 位元組；FileKey (nvarchar) 是儲存路徑；ProjectFileID、ETag
+  - CreateStamp, UpdateStamp (datetime)
+  用途：MetadataID → 有哪些檔案、每個檔案的 FileID（再拿去 get_kb_chunks 撈全文）
+
 table: HCM_EmployeeData（員工主檔，約 25 萬筆）
   ⚠️ 這張表原本有 135 個欄位，大部分是個資。下面列出的是「唯一查得到」的欄位——
   沒列到的（身分證、銀行帳號、護照、住址、手機、緊急聯絡人、密碼、推播 token 等）
@@ -198,6 +236,100 @@ def _format_records(columns: list[str], rows: list[dict]) -> str:
         lines += [f"{c}: {r[c]}" for c in columns if r.get(c) not in (None, "")]
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
+
+
+def _human_size(size) -> str:
+    """位元組轉人看得懂的大小。FileSize 允許 NULL，所以要吃得下 None。"""
+    if size in (None, ""):
+        return "大小未知"
+    try:
+        n = float(size)
+    except (TypeError, ValueError):
+        return str(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def _clip(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _like_prefix(doc_no: str) -> str:
+    """把單號轉成「底下的複合單號」用的 LIKE 樣板（配 SQL 裡的 ESCAPE '\\'）。
+
+    PDP 的附件掛在 ProjectCode + '_' + GridType + '_' + CategoryManagementID 這種
+    複合 SourceID 底下，所以要用前綴比對。⚠️ T-SQL 的 LIKE 裡 _ 本身是「任一個
+    字元」的萬用字元，直接寫 code + '_%' 會讓 PDP3-202112-0016 也撈到
+    PDP3-202112-0016-01（_ 剛好比對到那個 -），所以使用者給的值裡的 \\ % _ [
+    一律轉義，只有最後接上去的那個底線是真的分隔符。
+    """
+    escaped = (doc_no.replace("\\", "\\\\").replace("%", "\\%")
+               .replace("_", "\\_").replace("[", "\\["))
+    return escaped + "\\_%"
+
+
+# AI_Library_KBFile.StatusCode 代表「已建索引、撈得到 chunk」的值。
+# 同一個值在 tools/kb_chunks.py 也用到（INDEXED_STATUS）。
+_INDEXED_STATUS = "INDEX_OK"
+
+
+def _format_kb_attachments(doc_no: str, rows: list[dict]) -> str:
+    """把 metadata × file 的 join 結果排成「一張來源單一個區塊」。
+
+    刻意不用 _format_rows 那種 pipe 表格：一列同時有 Title、ReferenceURL 跟兩個
+    32 碼 ID，排成表格會又寬又難讀，而且模型要從裡面挑出 MetadataID／FileID 帶去
+    get_kb_chunks——ID 直式列出來比較不容易抄錯。
+    """
+    if not rows:
+        return (f"{doc_no}：知識庫裡查不到這張單"
+                f"（AI_Library_KBMetadata 沒有 SourceID = {doc_no} 或 {doc_no}_… 的紀錄）。"
+                "可能是還沒被灌進知識庫，或單號打錯。")
+
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        groups.setdefault(r.get("SourceID") or "", []).append(r)
+    files = [r for r in rows if r.get("FileID")]
+    fetchable = [r for r in files if r.get("FileStatus") == _INDEXED_STATUS]
+
+    head = [f"{doc_no}：知識庫裡有 {len(groups)} 筆來源單（MetadataID）、{len(files)} 個檔案，"
+            f"其中 {len(fetchable)} 個可以撈 chunk 全文（StatusCode = {_INDEXED_STATUS}）。"]
+    if fetchable:
+        head.append("要看某個檔案裡實際寫了什麼，把下面的 MetadataID 與 FileID "
+                    "原樣帶進 get_kb_chunks。")
+
+    blocks = []
+    for source_id, rs in groups.items():
+        m = rs[0]
+        line = (f"── {source_id}（{m.get('SourceName')} / {m.get('MetaStatus')}）"
+                f"｜MetadataID: {m.get('MetadataID')}")
+        # 可看範圍不是 ALL 的文件，get_kb_chunks 預設會擋（見該檔案的權限說明），
+        # 這裡先標出來，免得模型撈到一半才發現拿不到內容。
+        scoped = [f"{c}={_clip(m.get(c) or '', 40)}" for c in ("CompCode", "DepCode", "EmpID")
+                  if (m.get(c) or "").strip().upper() != "ALL"]
+        if scoped:
+            line += f"｜⚠️ 可看範圍受限（{'、'.join(scoped)}）"
+        lines = [line]
+        title = _clip(m.get("Title") or "", 140)
+        if title:
+            lines.append(f"   摘要：{title}")
+        url = (m.get("ReferenceURL") or "").strip()
+        if url:
+            lines.append(f"   表單連結：{url}")
+        for r in rs:
+            if not r.get("FileID"):
+                lines.append("   （這筆底下沒有任何檔案）")
+                continue
+            ok = r.get("FileStatus") == _INDEXED_STATUS
+            lines.append(
+                f"   {'[可撈]' if ok else '[不可撈]'} {r.get('OriginalFileName')}"
+                f"（{r.get('FileType')}, {_human_size(r.get('FileSize'))}, {r.get('FileStatus')}）"
+                f"｜FileID: {r.get('FileID')}")
+        blocks.append("\n".join(lines))
+    return "\n".join(head) + "\n\n" + "\n".join(blocks)
 
 
 def _generate_sql(question: str) -> str:
@@ -324,6 +456,46 @@ def register(server) -> None:
             head = (f"{project_code}：有 {len(attached)} 個對應附件"
                     f"（另有 {skipped} 個項目標記為「不需要」）。")
         return f"{head}\n\n{_format_rows(columns, rows)}"
+
+    @server.tool(
+        name="query_kb_attachments",
+        description=(
+            "依表單號碼查它在知識庫裡有哪些檔案（附件），並回傳撈全文需要的 "
+            "MetadataID 與 FileID。吃 CAR 案號（CAR3-YYYYMM-NNNNNN）與 PDP 專案代碼"
+            "（PDP5-202409-0007 等），PDP 會一併帶出各附件項目（EVT/DVT/PVT 各階段的 "
+            "PFMEA、DFMEA、安規申請、一致性確認…）底下的檔案。"
+            "何時使用：使用者想知道「這張單有沒有附件、附件是什麼檔」，"
+            "或接下來要用 get_kb_chunks 看附件內容時——先用這支拿到兩個 ID。"
+            "注意：這支只回檔案清單，不回檔案內容；單號原樣傳進來，不要修正格式。"
+        ),
+    )
+    def query_kb_attachments(doc_no: str) -> str:
+        """表單號碼，原樣照抄使用者給的值（CAR 案號如 CAR3-202310-000261，
+        PDP 專案代碼如 PDP5-202302-0057；也可以直接給 PDP 的複合單號
+        PDP5-202302-0057_EVT_CTM-202209-051001）"""
+        # 等號比對抓「這張單本身」那一筆，LIKE 前綴抓 PDP 附件用的複合單號；
+        # 只有其中一種的話 CAR 查不到（沒有複合單號）或 PDP 漏掉全部附件。
+        # LEFT JOIN 是因為 metadata 可能一個檔案都沒有（例如 StatusCode=FAILED
+        # 的那 984 筆），那種情況也要看得到「這張單在知識庫裡但沒有檔案」。
+        sql = (
+            "SELECT m.SourceID, m.MetadataID, m.SourceName, m.DocType, "
+            "m.StatusCode AS MetaStatus, m.TotalCount, m.Title, m.ReferenceURL, "
+            "m.CompCode, m.DepCode, m.EmpID, f.FileID, f.OriginalFileName, "
+            "f.FileType, f.FileSize, f.StatusCode AS FileStatus "
+            "FROM AI_Library_KBMetadata m "
+            "LEFT JOIN AI_Library_KBFile f ON f.MetadataID = m.MetadataID "
+            "WHERE m.SourceID = :doc_no OR m.SourceID LIKE :doc_prefix ESCAPE '\\' "
+            # 排序：來源單擺在一起（專案本身那筆的 SourceID 最短，會排在附件前面），
+            # 每張單裡把「撈得到 chunk 的真附件」排在最上面，DATA 的 .json 跟
+            # 作廢/失敗的檔案往後排。ORDER BY 明確寫死，應用層截斷（ROW_LIMIT）
+            # 才會是「砍掉最不重要的那些」而不是隨機少幾筆。
+            "ORDER BY m.SourceID, "
+            "CASE WHEN f.StatusCode = 'INDEX_OK' THEN 0 ELSE 1 END, "
+            "CASE WHEN f.FileType = 'FILE' THEN 0 ELSE 1 END, f.OriginalFileName"
+        )
+        columns, rows = db.run_readonly(
+            sql, params={"doc_no": doc_no, "doc_prefix": _like_prefix(doc_no)})
+        return _format_kb_attachments(doc_no, rows)
 
     @server.tool(
         name="query_employee",
